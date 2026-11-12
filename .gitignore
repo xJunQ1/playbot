@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 构建产物
+dist/
+build/
+
+# 大模型原始文件（保留精简版 jian_min.glb，176KB）
+assets/jian.glb
+assets/jian_low.glb
+assets/jian_final.glb
+
+# 测试截图与临时脚本
+tests/*.png
+tests/_*.py
+tests/__pycache__/
+tests/clip-analysis.json
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 日志
+*.log
+npm-debug.log*

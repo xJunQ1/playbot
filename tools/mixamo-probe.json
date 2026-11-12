@@ -1,0 +1,18 @@
+{
+  "url": "https://www.mixamo.com/#/",
+  "title": "Mixamo",
+  "inputs": [],
+  "buttons": [
+    {
+      "tag": "BUTTON",
+      "text": "Sign Up for Free",
+      "cls": "spectrum-Button spectrum-Button--cta"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "Log In",
+      "cls": "spectrum-Button spectrum-Button--overBackground"
+    }
+  ],
+  "text": "Characters\nAnimations\nLog in\nSign up\n\nMixamo\n\nGet animated.\n\nAnimate 3D characters for games, film, and more.\n\nSign Up for Free\nLog In\n\nEmpowering creativity with animated 3D characters.\n\nBring your projects to life with 3D characters, skeletal rigs, and animations, ready for use in film, games, interactive experiences and illustration.\n\nReady to Use Characters\n\nBrowse a collection of high-quality 3D characters. From realistic to cartoon, fantasy to sci-fi, there’s a character for every purpose. Each character comes fully textured and rigged so you can use immediately in your creative projects"
+}

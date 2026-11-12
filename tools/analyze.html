@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>Clip Analyzer</title>
+<style>
+  body { background:#0b0c0e; color:#cfd3d8; font:12px/1.6 "Cascadia Mono",monospace; margin:16px; }
+  .ok { color:#2fe08a; } .warn { color:#ffb86b; } .dim { color:#5d6672; }
+  th,td { padding:2px 10px 2px 0; text-align:left; }
+  th { color:#7d8794; font-weight:600; border-bottom:1px solid #2a3038; }
+  #status { margin-bottom:12px; color:#8fd3ff; }
+</style>
+</head>
+<body>
+<div id="status">loading…</div>
+<table id="out"></table>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/node_modules/three/build/three.module.js",
+    "three/addons/": "/node_modules/three/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
+
+const PACK = {
+  Idle: '/assets/Idle.glb',
+  Walking: '/assets/Walking.glb',
+  Running: '/assets/Running.glb',
+  Dive_Roll: '/assets/Stand_To_Roll.glb',
+  Blocking: '/assets/Blocking.glb',
+  Getting_Hit_Backwards: '/assets/Reaction.glb',
+  Death: '/assets/Two_Handed_Sword_Death.glb',
+  Stable_Sword_Inward_Slash: '/assets/Sword_And_Shield_Slash.glb',
+  Stable_Sword_Outward_Slash: '/assets/Sword_Slash.glb',
+  Great_Sword_Slash: '/assets/Great_Sword_Slash.glb',
+  Great_Sword_Attack: '/assets/Great_Sword_High_Spin_Attack.glb',
+  Standing_Dodge_Forward: '/assets/Standing_Dodge_Forward.glb',
+  Sword_Shield_180: '/assets/sword_and_shield_180_turn.glb',
+  Sword_Shield_180_2: '/assets/sword_and_shield_180_turn_2.glb',
+  Sword_Shield_Jump: '/assets/sword_and_shield_jump.glb',
+};
+
+const STATUS = document.getElementById('status');
+const OUT = document.getElementById('out');
+const FPS = 60;
+
+const loader = new GLTFLoader();
+const charGltf = await loader.loadAsync('/assets/Y_Bot.glb');
+const base = charGltf.scene;
+
+// GLTFLoader 会 sanitize 节点名（冒号常被替换），不能死认 'mixamorig:RightHand'
+const boneNames = [];
+base.traverse((o) => { if (o.name) boneNames.push(o.name); });
+window.__HAND_BONES__ = boneNames.filter((n) => /hand/i.test(n) && !/thumb|index|middle|ring|pinky/i.test(n));
+
+function findHand(root) {
+  const direct = root.getObjectByName('mixamorig:RightHand');
+  if (direct) return direct;
+  let found = null;
+  root.traverse((o) => {
+    if (found || !o.name) return;
+    if (!/righthand/i.test(o.name)) return;
+    if (/thumb|index|middle|ring|pinky/i.test(o.name)) return;
+    found = o;
+  });
+  return found;
+}
+
+/**
+ * 采样右手在整段剪辑里的世界坐标，用速度曲线找打击点。
+ * 动捕没有 hitbox，但「手最快的那一帧」几乎总等于「武器最快的那一帧」，
+ * 也就是判定该生效的地方。
+ */
+function analyze(clip) {
+  const body = skeletonClone(base);
+  body.updateMatrixWorld(true);
+  const hand = findHand(body);
+  if (!hand) return { error: 'no RightHand', bones: window.__HAND_BONES__ };
+
+  const mixer = new THREE.AnimationMixer(body);
+  const action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;
+  action.play();
+
+  const N = Math.ceil(clip.duration * FPS);
+  const pos = [];
+  const tmp = new THREE.Vector3();
+  for (let i = 0; i <= N; i++) {
+    // 必须夹住：i/FPS 一旦超过 duration，clip 会循环回第 0 帧，
+    // 手的世界坐标瞬移，速度曲线炸成 180 m/s，峰值就落在最后一帧。
+    mixer.setTime(Math.min(clip.duration - 1e-4, i / FPS));
+    body.updateMatrixWorld(true);
+    hand.getWorldPosition(tmp);
+    pos.push(tmp.clone());
+  }
+
+  const speeds = [];
+  for (let i = 1; i < pos.length; i++) {
+    speeds.push(pos[i].distanceTo(pos[i - 1]) * FPS);   // m/s
+  }
+  if (!speeds.length) return { error: 'empty' };
+
+  let peakIdx = 0;
+  for (let i = 1; i < speeds.length; i++) if (speeds[i] > speeds[peakIdx]) peakIdx = i;
+  const peak = speeds[peakIdx];
+
+  // 起步：速度首次超过峰值的 25%
+  let accelIdx = speeds.findIndex((s) => s > peak * 0.25);
+  if (accelIdx < 0) accelIdx = 0;
+
+  // 判定窗：峰值前后速度仍高于 60% 的连续区间
+  let a = peakIdx, b = peakIdx;
+  while (a > 0 && speeds[a - 1] > peak * 0.6) a--;
+  while (b < speeds.length - 1 && speeds[b + 1] > peak * 0.6) b++;
+
+  return {
+    duration: +clip.duration.toFixed(2),
+    frames: N,
+    accelFrame: accelIdx + 1,
+    strikeFrame: peakIdx + 1,
+    activeStart: a + 1,
+    activeLen: Math.max(1, b - a + 1),
+    peakSpeed: +peak.toFixed(2),
+    endSpeed: +speeds[speeds.length - 1].toFixed(2),
+  };
+}
+
+const rows = [];
+for (const [name, url] of Object.entries(PACK)) {
+  STATUS.textContent = `analyzing ${name}…`;
+  try {
+    const g = await loader.loadAsync(url);
+    const clip = g.animations?.[0];
+    if (!clip) { rows.push({ name, error: 'no clip' }); continue; }
+    clip.name = name;
+    rows.push({ name, ...analyze(clip) });
+  } catch (e) {
+    rows.push({ name, error: e.message });
+  }
+}
+
+STATUS.innerHTML = '<span class="ok">done</span>';
+
+let html = '<tr><th>clip</th><th>dur</th><th>frames</th><th>accel</th><th>strike</th><th>active</th><th>len</th><th>peak m/s</th></tr>';
+for (const r of rows) {
+  if (r.error) { html += `<tr><td>${r.name}</td><td colspan="7" class="warn">${r.error}</td></tr>`; continue; }
+  html += `<tr><td>${r.name}</td><td>${r.duration}</td><td>${r.frames}</td>` +
+          `<td>${r.accelFrame}</td><td class="ok">${r.strikeFrame}</td>` +
+          `<td>${r.activeStart}</td><td>${r.activeLen}</td><td>${r.peakSpeed}</td></tr>`;
+}
+OUT.innerHTML = html;
+
+window.__ANALYSIS__ = rows;
+window.__DONE__ = true;
+</script>
+</body>
+</html>

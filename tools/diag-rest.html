@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8" /><title>rest diag</title>
+<style>body{background:#0b0c0e;color:#cfd3d8;font:12px/1.6 monospace;margin:16px}
+td,th{padding:2px 10px 2px 0;text-align:left}th{color:#7d8794;border-bottom:1px solid #2a3038}
+.warn{color:#ff6b6b}.ok{color:#2fe08a}</style></head>
+<body>
+<div id="status">loading…</div><table id="out"></table>
+<script type="importmap">
+{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const loader = new GLTFLoader();
+const status = document.getElementById('status');
+
+function collectBones(root) {
+  const m = new Map();
+  root.traverse((o) => { if (o.isBone || (o.name && /^mixamorig/i.test(o.name))) m.set(o.name, o); });
+  return m;
+}
+
+function angleBetween(q1, q2) {
+  const d = Math.abs(q1.dot(q2));
+  return THREE.MathUtils.radToDeg(2 * Math.acos(Math.min(1, d)));
+}
+
+const char = await loader.loadAsync('/assets/xbot.glb');
+const animGltf = await loader.loadAsync('/assets/anim/Great_Sword_Slash.glb');
+const clip = animGltf.animations[0];
+
+const tb = collectBones(char.scene);
+const sb = collectBones(animGltf.scene);
+
+// clip 的 track 名格式： mixamorigHips.quaternion
+const parse = (n) => { const i = n.lastIndexOf('.'); return [n.slice(0, i), n.slice(i + 1)]; };
+const boneNames = [...new Set(clip.tracks.map((t) => parse(t.name)[0]))];
+
+const rows = [];
+let maxDiff = 0;
+for (const name of boneNames) {
+  const t = tb.get(name), s = sb.get(name);
+  if (!t || !s) { rows.push({ name, missing: !t ? 'target' : 'source' }); continue; }
+  const diff = angleBetween(t.quaternion, s.quaternion);
+  maxDiff = Math.max(maxDiff, diff);
+  rows.push({ name, diff, tq: t.quaternion.toArray().map(v => +v.toFixed(3)),
+              sq: s.quaternion.toArray().map(v => +v.toFixed(3)) });
+}
+
+status.innerHTML = `max rest-rotation mismatch: <b class="${maxDiff > 5 ? 'warn' : 'ok'}">${maxDiff.toFixed(1)}°</b>`;
+let html = '<tr><th>bone</th><th>Δ°</th><th>target rest</th><th>source rest</th></tr>';
+for (const r of rows.sort((a, b) => (b.diff ?? -1) - (a.diff ?? -1)).slice(0, 18)) {
+  if (r.missing) { html += `<tr class="warn"><td>${r.name}</td><td colspan="3">missing in ${r.missing}</td></tr>`; continue; }
+  const cls = r.diff > 5 ? 'warn' : '';
+  html += `<tr class="${cls}"><td>${r.name}</td><td>${r.diff.toFixed(1)}</td><td>${r.tq}</td><td>${r.sq}</td></tr>`;
+}
+document.getElementById('out').innerHTML = html;
+window.__DONE__ = true;
+window.__MAXDIFF__ = maxDiff;
+</script></body></html>

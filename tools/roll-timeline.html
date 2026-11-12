@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8" /><title>Roll timeline</title>
+<style>body{background:#0b0c0e;color:#cfd3d8;font:12px/1.5 monospace;margin:16px}
+td,th{padding:1px 8px;text-align:right}th{color:#7d8794}
+.lo{color:#ffb86b}.ok{color:#2fe08a}</style></head>
+<body>
+<div id="status">loading…</div>
+<table id="out"></table>
+<script type="importmap">
+{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
+
+const FPS = 60;
+const loader = new GLTFLoader();
+const charGltf = await loader.loadAsync('/assets/Y_Bot.glb');
+const animGltf = await loader.loadAsync('/assets/Stand_To_Roll.glb');
+const clip = animGltf.animations[0];
+
+const body = skeletonClone(charGltf.scene);
+body.updateMatrixWorld(true);
+
+const findBone = (root, re) => {
+  let hit = null;
+  root.traverse((o) => {
+    if (hit || !o.name) return;
+    if (re.test(o.name) && !/thumb|index|middle|ring|pinky|toe/i.test(o.name)) hit = o;
+  });
+  return hit;
+};
+const hips = findBone(body, /^mixamorigHips$/i);
+const head = findBone(body, /^mixamorigHead$/i);
+const hand = findBone(body, /righthand/i);
+
+const mixer = new THREE.AnimationMixer(body);
+const act = mixer.clipAction(clip);
+act.setLoop(THREE.LoopOnce, 1);
+act.clampWhenFinished = true;
+act.play();
+
+const N = Math.ceil(clip.duration * FPS);
+const rows = [];
+const v = new THREE.Vector3();
+
+for (let i = 0; i <= N; i++) {
+  const t = Math.min(clip.duration - 1e-4, i / FPS);
+  mixer.setTime(t);
+  body.updateMatrixWorld(true);
+  hips.getWorldPosition(v);
+  const hy = v.y;
+  head.getWorldPosition(v);
+  const hdy = v.y;
+  hand.getWorldPosition(v);
+  rows.push({ f: i, hipsY: +hy.toFixed(3), headY: +hdy.toFixed(3), handY: +v.y.toFixed(3) });
+}
+
+// 翻滚判据：头顶高度明显低于站立时的 60%
+const standHead = rows.slice(0, 5).reduce((s, r) => s + r.headY, 0) / 5;
+const th = standHead * 0.55;
+const low = rows.filter((r) => r.headY < th);
+const rollStart = low.length ? low[0].f : -1;
+const rollEnd = low.length ? low[low.length - 1].f : -1;
+
+document.getElementById('status').innerHTML =
+  `clip=${clip.duration.toFixed(2)}s  frames=${N}  standHeadY=${standHead.toFixed(2)}  ` +
+  `翻滚段: <b class="ok">${rollStart} → ${rollEnd}</b> (${rollEnd - rollStart + 1} 帧)`;
+
+let html = '<tr><th>frame</th><th>t</th><th>hipsY</th><th>headY</th><th>handY</th></tr>';
+for (const r of rows) {
+  const cls = r.headY < th ? 'lo' : '';
+  if (r.f % 2 === 0) {
+    html += `<tr class="${cls}"><td>${r.f}</td><td>${(r.f/FPS).toFixed(2)}</td>` +
+            `<td>${r.hipsY}</td><td>${r.headY}</td><td>${r.handY}</td></tr>`;
+  }
+}
+document.getElementById('out').innerHTML = html;
+
+window.__ROLL__ = { standHead, threshold: th, rollStart, rollEnd, frames: N, duration: clip.duration, rows };
+window.__DONE__ = true;
+</script></body></html>
