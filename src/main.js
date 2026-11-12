@@ -1184,8 +1184,15 @@ function resetFight() {
 // ═══════════════════════════════════════════════════════════════
 (async function attachModels() {
   const q = new URLSearchParams(location.search);
-  const pUrl = q.get('p');
-  const bUrl = q.get('b');
+
+  // 默认就加载完整美术资源：模型 + 武器 + 动捕包。
+  // 想回到纯灰盒（零依赖、秒开）加 ?graybox=1。
+  const graybox = q.get('graybox') != null;
+  const pUrl = graybox ? null : (q.get('p') ?? 'assets/Y_Bot.glb');
+  const bUrl = graybox ? null : (q.get('b') ?? 'assets/Y_Bot.glb');
+  const wantWeapon = !graybox && q.get('noweapon') == null;
+  const weaponUrl = wantWeapon ? (q.get('wp') ?? 'assets/jian_min.glb') : null;
+  const wantAnim = !graybox && q.get('anim') !== '0';
   if (!pUrl && !bUrl) return;
 
   try {
@@ -1196,8 +1203,8 @@ function resetFight() {
         renderer,
         targetHeight: Number(q.get('ph') ?? 1.95),
         // 武器：优先用外部模型（wp 参数），否则用程序化生成的剑
-        weaponModel: q.get('wp') ?? null,
-        weaponOpts: q.get('wp') ? {
+        weaponModel: weaponUrl,
+        weaponOpts: weaponUrl ? {
           length: Number(q.get('wl') ?? 1.4),
           alignAxis: q.get('wax') ?? 'z',
           gripEnd: Number(q.get('wgrip') ?? -1),
@@ -1206,7 +1213,7 @@ function resetFight() {
           palmSide: Number(q.get('wside') ?? -0.05),
           rotation: q.get('wrot') ? q.get('wrot').split(',').map(Number) : undefined,
         } : undefined,
-        weapon: (!q.get('wp') && !q.get('noweapon')) ? { length: Number(q.get('wl') ?? 1.4) } : null,
+        weapon: (!weaponUrl && wantWeapon) ? { length: Number(q.get('wl') ?? 1.4) } : null,
         scale: Number(q.get('ps') ?? 1),
         yawOffset: Number(q.get('py') ?? 0),
       }) : null,
@@ -1214,8 +1221,8 @@ function resetFight() {
         renderer,
         targetHeight: Number(q.get('bh') ?? 4.60),
         // Boss 也用同一把模型剑，只是按体型放大
-        weaponModel: q.get('wp') ?? null,
-        weaponOpts: q.get('wp') ? {
+        weaponModel: weaponUrl,
+        weaponOpts: weaponUrl ? {
           length: Number(q.get('bwl') ?? 2.2),
           alignAxis: q.get('wax') ?? 'z',
           gripEnd: Number(q.get('wgrip') ?? -1),
@@ -1224,14 +1231,14 @@ function resetFight() {
           palmSide: Number(q.get('wside') ?? -0.05),
           rotation: q.get('wrot') ? q.get('wrot').split(',').map(Number) : undefined,
         } : undefined,
-        weapon: (!q.get('wp') && !q.get('noweapon')) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
+        weapon: (!weaponUrl && wantWeapon) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
         scale: Number(q.get('bs') ?? 1),
         yawOffset: Number(q.get('by') ?? 0),
       }) : null,
     ].filter(Boolean));
 
     // 追加类魂动作包（13 条 Mixamo 动捕，骨骼名同源，不需要 retarget）
-    if (q.get('anim')) {
+    if (wantAnim) {
       banner('加载动作包…', 1200);
       const actors = [player, boss].filter((a) => a.binder);
       const counts = await Promise.all(actors.map((a) => loadAnimationPack(a.binder)));
