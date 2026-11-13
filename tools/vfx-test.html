@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <title>melee vfx check</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: #0b0c0e;
+      overflow: hidden
+    }
+
+    #log {
+      position: fixed;
+      left: 12px;
+      top: 10px;
+      z-index: 5;
+      color: #9fe6ff;
+      font: 12px/1.6 Consolas, monospace;
+      white-space: pre
+    }
+
+    #log.err {
+      color: #ff6b6b
+    }
+  </style>
+  <script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+</script>
+</head>
+
+<body>
+  <div id="log">booting…</div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { MeleeVFX, VFX_CFG } from '../src/vfx/melee.js';
+
+    const el = document.getElementById('log');
+    const log = (s) => { el.textContent += '\n' + s; };
+    const fail = (e) => {
+      el.classList.add('err');
+      log('ERROR: ' + (e?.message ?? e));
+      document.title = 'ERR';
+    };
+    addEventListener('error', (e) => fail(e.error ?? e.message));
+    addEventListener('unhandledrejection', (e) => fail(e.reason));
+
+    try {
+      // 慢放，让同一帧里能看到三种挥砍的不同扫过阶段
+      VFX_CFG.slashLife = 4;
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0c0e);
+      const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 100);
+      camera.position.set(0, 5.6, 10.2);
+      camera.lookAt(0, 1.0, 0);
+
+      scene.add(new THREE.GridHelper(26, 26, 0x24384a, 0x16202c));
+
+      const dummy = (x, z, color) => {
+        const m = new THREE.Mesh(
+          new THREE.CapsuleGeometry(0.28, 1.1, 4, 8),
+          new THREE.MeshBasicMaterial({ color, wireframe: true })
+        );
+        m.position.set(x, 0.85, z);
+        scene.add(m);
+      };
+      dummy(0, 0, 0x4b7fa8);
+
+      const vfx = new MeleeVFX(scene, { getCamera: () => camera });
+      const player = { pos: new THREE.Vector3(0, 0, 0), yaw: Math.PI, scale: 1, isBoss: false };
+      const boss = { pos: new THREE.Vector3(3.4, 0, -1.6), yaw: Math.PI * 0.82, scale: 2.6, isBoss: true };
+
+      const light = { active: 6, swing: 'horizontal', damage: 90, hitbox: { offset: 1.05, radius: 0.85, yMin: 0.3, yMax: 1.9 } };
+      const thrust = { active: 6, swing: 'thrust', damage: 380, hitbox: { offset: 1.2, radius: 0.95, yMin: 0.2, yMax: 2.1 } };
+      const vertical = { active: 6, swing: 'vertical', damage: 260, hitbox: { offset: 1.25, radius: 0.95, yMin: 0.2, yMax: 2.1 } };
+
+      const step = (n) => { for (let i = 0; i < n; i++) vfx.update(1 / 60); };
+
+      // 三道刀光错开 8 帧生成，于是各处在「刚出刀 / 扫一半 / 快扫完」
+      vfx.swingFromActor(player, light);
+      step(8);
+      vfx.swingFromActor(player, thrust);
+      step(8);
+      vfx.swingFromActor(boss, vertical);
+      step(8);
+
+      // 命中火花 + 弹反冲击环
+      vfx.hit({ move: light, scale: 1 }, { pos: new THREE.Vector3(0.7, 0, 1.5), scale: 1 }, {
+        center: new THREE.Vector3(0.35, 1.0, 0.95), radius: 0.7, yMin: 0.3, yMax: 1.8,
+      });
+      vfx.parry(player);
+      step(3);
+
+      renderer.render(scene, camera);
+
+      const info = renderer.info.render;
+      log(`effects=${vfx.activeCount}  calls=${info.calls}  tris=${info.triangles}`);
+      log('OK');
+      document.title = 'OK';
+    } catch (e) {
+      fail(e);
+    }
+  </script>
+</body>
+
+</html>
