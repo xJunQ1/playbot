@@ -1194,6 +1194,44 @@ fVfx.add(VFX_CFG, 'sparkCount', 0, 40, 1).name('火花数量');
 fVfx.add(VFX_CFG, 'telegraph').name('Boss 起手预警');
 fVfx.add(VFX_CFG, 'telegraphStart', 0, 1, 0.05).name('起手亮度');
 
+// ── Boss 武器朝向（绕柄旋转，改完立即生效）──────────────────────────
+// 原理：outer.rotation 以「柄重心」为支点，改角度后 realign() 会重测
+// 柄位置并补平移 —— 柄钉在掌心，只有刃身绕柄甩。
+// 默认值要和下面 attachModels 里的 [-100°, 0, -90°] 保持一致。
+const DEG2RAD = Math.PI / 180;
+// grip：0 = 握在柄端，1 = 握在刃端；镰刀这类长柄一般握在中段 0.3~0.6
+const bossWeapon = { x: -100, y: 0, z: -90, roll: 0, grip: 0.10 };
+
+function applyBossWeapon() {
+  const wg = boss.binder && boss.binder.weaponGroup;
+  if (!wg) return;
+  wg.rotation.set(bossWeapon.x * DEG2RAD, bossWeapon.y * DEG2RAD, bossWeapon.z * DEG2RAD);
+  const w = wg.userData && wg.userData.weapon;
+  if (!w) return;
+  w.rollGroup.rotation.y = bossWeapon.roll * DEG2RAD;
+  if (typeof w.setGripShift === 'function') w.setGripShift(bossWeapon.grip);
+  else w.realign();
+}
+
+function flipBossWeapon(axis) {
+  // 加 180° 后归一化到 [-180, 180)
+  let v = bossWeapon[axis] + 180;
+  v = ((v % 360) + 360) % 360;
+  bossWeapon[axis] = v >= 180 ? v - 360 : v;
+  syncGUI();
+  applyBossWeapon();
+}
+
+const fWeapon = gui.addFolder('Boss 武器（绕柄）');
+fWeapon.add(bossWeapon, 'x', -180, 180, 1).name('绕柄 X°').onChange(applyBossWeapon);
+fWeapon.add(bossWeapon, 'y', -180, 180, 1).name('绕柄 Y°').onChange(applyBossWeapon);
+fWeapon.add(bossWeapon, 'z', -180, 180, 1).name('绕柄 Z°').onChange(applyBossWeapon);
+fWeapon.add(bossWeapon, 'roll', -180, 180, 1).name('沿柄滚转°').onChange(applyBossWeapon);
+fWeapon.add(bossWeapon, 'grip', 0, 1, 0.01).name('握柄位置(0柄端/1刃端)').onChange(applyBossWeapon);
+fWeapon.add({ fn: () => flipBossWeapon('x') }, 'fn').name('翻转 X 180°');
+fWeapon.add({ fn: () => flipBossWeapon('z') }, 'fn').name('翻转 Z 180°');
+fWeapon.add({ fn: () => { bossWeapon.x = -100; bossWeapon.y = 0; bossWeapon.z = -90; bossWeapon.roll = 0; bossWeapon.grip = 0.10; syncGUI(); applyBossWeapon(); } }, 'fn').name('恢复默认');
+
 function syncGUI() { gui.controllersRecursive().forEach((c) => c.updateDisplay()); }
 
 function downloadJSON() {
@@ -1241,6 +1279,8 @@ function resetFight() {
   const bUrl = graybox ? null : (q.get('b') ?? 'assets/Y_Bot.glb');
   const wantWeapon = !graybox && q.get('noweapon') == null;
   const weaponUrl = wantWeapon ? (q.get('wp') ?? 'assets/jian_min.glb') : null;
+  // Boss 单独一把武器：默认换镰刀，?bwp=... 可覆盖，?bwp=none 回到同一把剑
+  const bossWeaponUrl = !wantWeapon ? null : (q.get('bwp') === 'none' ? weaponUrl : (q.get('bwp') ?? 'assets/scythe.glb'));
   const wantAnim = !graybox && q.get('anim') !== '0';
   if (!pUrl && !bUrl) return;
 
@@ -1269,22 +1309,39 @@ function resetFight() {
       bUrl ? bindModel(boss, bUrl, {
         renderer,
         targetHeight: Number(q.get('bh') ?? 4.60),
-        // Boss 也用同一把模型剑，只是按体型放大
-        weaponModel: weaponUrl,
-        weaponOpts: weaponUrl ? {
-          length: Number(q.get('bwl') ?? 2.2),
-          alignAxis: q.get('wax') ?? 'z',
-          gripEnd: Number(q.get('wgrip') ?? -1),
-          gripShift: Number(q.get('wshift') ?? 0.10),
-          palmOffset: Number(q.get('wpalm') ?? 0.06),
-          palmSide: Number(q.get('wside') ?? -0.05),
-          rotation: q.get('wrot') ? q.get('wrot').split(',').map(Number) : undefined,
+        // Boss 的镰刀：等比缩放（默认开），长轴本来就是 Y，不需要转轴
+        weaponModel: bossWeaponUrl,
+        weaponOpts: bossWeaponUrl ? {
+          length: Number(q.get('bwl') ?? 2.10),
+          alignAxis: q.get('bwax') ?? 'y',
+          gripEnd: Number(q.get('bwgrip') ?? -1),
+          gripShift: Number(q.get('bwshift') ?? 0.10),
+          palmOffset: Number(q.get('bwpalm') ?? 0.06),
+          palmSide: Number(q.get('bwside') ?? -0.05),
+          uniform: q.get('bwuni') !== '0',
+          roll: Number(q.get('bwroll') ?? 0),
+          // 实测：绕手骨 X ≈ -100°，镰刀柄朝前、刀刃抬到腰高，静止时不拖地
+          rotation: q.get('bwrot') ? q.get('bwrot').split(',').map(Number) : [-100 * Math.PI / 180, 0, -Math.PI / 2],
         } : undefined,
-        weapon: (!weaponUrl && wantWeapon) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
+        weapon: (!bossWeaponUrl && wantWeapon) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
         scale: Number(q.get('bs') ?? 1),
         yawOffset: Number(q.get('by') ?? 0),
       }) : null,
     ].filter(Boolean));
+
+    // 把实际加载到的武器角度同步进调参面板（用 ?bwrot= 覆盖时也对得上）
+    const wg0 = boss.binder && boss.binder.weaponGroup;
+    if (wg0) {
+      bossWeapon.x = Math.round(wg0.rotation.x / DEG2RAD);
+      bossWeapon.y = Math.round(wg0.rotation.y / DEG2RAD);
+      bossWeapon.z = Math.round(wg0.rotation.z / DEG2RAD);
+      const w0 = wg0.userData && wg0.userData.weapon;
+      if (w0) {
+        bossWeapon.roll = Math.round(w0.rollGroup.rotation.y / DEG2RAD);
+        if (typeof w0.getGripShift === 'function') bossWeapon.grip = w0.getGripShift();
+      }
+      syncGUI();
+    }
 
     // 追加类魂动作包（13 条 Mixamo 动捕，骨骼名同源，不需要 retarget）
     if (wantAnim) {
