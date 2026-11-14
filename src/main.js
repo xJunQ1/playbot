@@ -4,6 +4,7 @@ import { CFG, MOVES, LIMITS, totalFrames, motionAt, dumpJSON, moveIssues, valida
 import { makeFighter, makeArena, setupLights, createViz, placeViz, applyPose } from './graybox.js';
 import { poseFor } from './pose.js';
 import { FootIK } from './footik.js';
+import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 
 // ═══════════════════════════════════════════════════════════════
 //  0. 渲染基础设施
@@ -26,6 +27,9 @@ camera.position.set(0, 6, 10);
 
 setupLights(scene);
 const ARENA = makeArena(scene, 30);
+
+// 近战特效（刀光 / 命中火花 / 弹反），纯程序化，不依赖外部资源
+const vfx = new MeleeVFX(scene, { getCamera: () => camera });
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -237,6 +241,7 @@ function resolveHit(attacker, defender, hb) {
                    defender.pos, hurtR, 0, hurtY1)) return;
 
   attacker.hitSet.add(defender.name);
+  vfx.hit(attacker, defender, hb);
   applyDamage(attacker, defender, attacker.move);
 }
 
@@ -252,6 +257,7 @@ function applyDamage(attacker, defender, move) {
       player.iframe = 20;
       shake(0.14);
       hitstop(HITSTOP_HEAVY());
+      vfx.parry(player);
       banner('弹反', 500);
       return;
     }
@@ -267,6 +273,7 @@ function applyDamage(attacker, defender, move) {
     }
     shake(0.05);
     hitstop(HITSTOP_LIGHT());
+    vfx.guard(player);
     flash(defender);
     return;
   }
@@ -784,6 +791,22 @@ let shakeAmt = 0;
 function hitstop(f) { hitstopFrames = Math.max(hitstopFrames, f); }
 function shake(v) { shakeAmt = Math.min(0.3, shakeAmt + v); }
 
+/** 出招第一帧挂预警；之后特效自己读 actor.frame，判定帧一到自动淡出 */
+function syncTelegraph(a) {
+  if (!a.move || a.move.active <= 0) return;
+  if (a.frame !== 1) return;
+  if (VFX_CFG.telegraphBossOnly && !a.isBoss) return;
+  vfx.telegraph(a, a.move);
+}
+
+/** 判定窗口的第一帧放刀光（不是起手帧） */
+function spawnSwingVFX(a) {
+  const m = a.move;
+  if (!m || m.active <= 0) return;
+  if (a.frame !== m.startup) return;
+  vfx.swingFromActor(a, m);
+}
+
 function tick() {
   if (CFG.paused) return;
   if (hitstopFrames > 0) { hitstopFrames--; shakeAmt *= 0.75; return; }
@@ -796,6 +819,14 @@ function tick() {
   // 判定：双向
   resolveHit(player, boss, activeHitbox(player));
   resolveHit(boss, player, activeHitbox(boss));
+
+  // 起手预警：出招第一帧挂上，判定帧前最亮（类魂的「读招」全靠它）
+  syncTelegraph(player);
+  syncTelegraph(boss);
+
+  // 刀光在「判定帧第一帧」才亮 —— 起手就亮会让攻击没有重量
+  spawnSwingVFX(player);
+  spawnSwingVFX(boss);
 
   // 角色间推挤（翻滚时关闭 —— 这就是「穿身」）
   // 不对称：被顶开的是 Boss 多、玩家少。五五开的话，体型大的一方主动往里压，
@@ -989,6 +1020,9 @@ function render(dtReal) {
   applyActorPose(player, dtReal);
   applyActorPose(boss, dtReal);
 
+  // 特效推进：顿帧时冻结（打在铁上那一下要「停」住）
+  vfx.update(CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale);
+
   renderer.render(scene, camera);
 }
 
@@ -1146,6 +1180,13 @@ fDebug.add(CFG, 'hitstop', 0, 16, 1).name('命中冻结帧');
 fDebug.add({ fn: resetFight }, 'fn').name('重开 (R)');
 fDebug.add({ fn: downloadJSON }, 'fn').name('导出帧表 (P)');
 
+const fVfx = gui.addFolder('近战特效');
+fVfx.add(VFX_CFG, 'enabled').name('开启');
+fVfx.add(VFX_CFG, 'intensity', 0, 2, 0.05).name('强度');
+fVfx.add(VFX_CFG, 'slashLife', 0.4, 2.5, 0.05).name('刀光时长倍率');
+fVfx.add(VFX_CFG, 'sparkCount', 0, 40, 1).name('火花数量');
+fVfx.add(VFX_CFG, 'telegraph').name('Boss 起手预警');
+
 function syncGUI() { gui.controllersRecursive().forEach((c) => c.updateDisplay()); }
 
 function downloadJSON() {
@@ -1171,6 +1212,7 @@ function resetFight() {
   logicFrame = 0;
   hitstopFrames = 0;
   shakeAmt = 0;
+  vfx.clear();
   player.footIK.reset(player);
   boss.footIK.reset(boss);
   bannerEl.classList.remove('show');
