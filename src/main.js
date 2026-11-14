@@ -1141,12 +1141,11 @@ fBoss.add(CFG, 'bossTurnFrames', 8, 60, 1).name('转身180°帧');
 fBoss.add(CFG, 'bossComboGap', 0.3, 2.5, 0.05).name('连段间隔(s)');
 fBoss.add(CFG, 'bossCooldownScale', 0.3, 2, 0.05).name('冷却倍率');
 
-const fMoves = gui.addFolder('招式帧数据');
 const moveParams = {};
 const moveInfo = {};
-for (const [id, m] of Object.entries(MOVES)) {
-  if (!id.startsWith('b_')) continue;
-  const sub = fMoves.addFolder(`${m.label} [${id}]`);
+
+function addMoveFolder(parent, id, m) {
+  const sub = parent.addFolder(`${m.label} [${id}]`);
   moveParams[id] = { startup: m.startup, active: m.active, recovery: m.recovery };
   moveInfo[id] = { total: totalFrames(m), check: 'ok' };
 
@@ -1171,6 +1170,13 @@ for (const [id, m] of Object.entries(MOVES)) {
   sub.add(moveInfo[id], 'total').name('→ 总帧').disable();
   sub.add(moveInfo[id], 'check').name('→ 检查').disable();
 }
+
+const fMovesP = gui.addFolder('玩家招式');
+const fMovesB = gui.addFolder('Boss 招式');
+for (const [id, m] of Object.entries(MOVES)) {
+  addMoveFolder(id.startsWith('b_') ? fMovesB : fMovesP, id, m);
+}
+fMovesP.open();
 
 const fDebug = gui.addFolder('调试');
 fDebug.add(CFG, 'showHitbox').name('判定框 (F1)').listen();
