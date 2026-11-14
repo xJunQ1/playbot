@@ -238,7 +238,7 @@ function resolveHit(attacker, defender, hb) {
   const hurtR = defender.hurt.radius * defender.scale;
 
   if (!cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax,
-                   defender.pos, hurtR, 0, hurtY1)) return;
+    defender.pos, hurtR, 0, hurtY1)) return;
 
   attacker.hitSet.add(defender.name);
   vfx.hit(attacker, defender, hb);
@@ -368,7 +368,7 @@ function playerTick() {
         const CHAIN = {
           light1: ['light2', 'p_light2', 'light'],
           light2: ['light3', 'p_light3', 'light'],
-          heavy:  ['heavy2', 'p_heavy2', 'heavy'],
+          heavy: ['heavy2', 'p_heavy2', 'heavy'],
           heavy2: ['heavy3', 'p_heavy3', 'heavy'],
         };
         const link = CHAIN[player.state];
@@ -464,8 +464,8 @@ function applyMoveInput(speedScale = 1) {
     // 如果让角色脸朝移动方向，就成了月球漫步 —— 面朝目标却横着飘过去。
     // 所以后退时让角色背对移动方向，腿往后踩的方向才和实际位移一致。
     : (fwdInput < 0
-        ? Math.atan2(-dir.x, -dir.z)
-        : Math.atan2(dir.x, dir.z));
+      ? Math.atan2(-dir.x, -dir.z)
+      : Math.atan2(dir.x, dir.z));
   player.turnToward(targetYaw, player.lockOn ? 16 : 12);
   return true;
 }
@@ -661,9 +661,9 @@ function bossTick() {
       if (boss.move) {
         // ── 佯攻：起手到一半突然取消，专门惩罚「看见抬手就翻滚」的玩家 ──
         if (!AI.feintChecked
-            && boss.frame >= boss.move.startup * 0.62
-            && boss.frame < boss.move.startup
-            && boss.move.active > 0) {
+          && boss.frame >= boss.move.startup * 0.62
+          && boss.frame < boss.move.startup
+          && boss.move.active > 0) {
           AI.feintChecked = true;
           if (rng() < (CFG.bossFeintChance ?? 0.12)) {
             boss.setState('idle');
@@ -711,9 +711,9 @@ function bossTick() {
 
       // ── 看破：玩家正在起手（还在 startup 段），Boss 有概率后撤躲开 ──
       const playerWinding = (player.state === 'light1' || player.state === 'light2'
-                              || player.state === 'heavy')
-                            && player.move
-                            && player.frame < player.move.startup;
+        || player.state === 'heavy')
+        && player.move
+        && player.frame < player.move.startup;
       if (playerWinding && dist < 6 && logicFrame > AI.nextDodge) {
         AI.nextDodge = logicFrame + 75;
         if (rng() < (CFG.bossDodgeChance ?? 0.35)) {
@@ -1110,10 +1110,10 @@ function guardBar(a) {
 function updateHUD() {
   const dist = player.pos.distanceTo(boss.pos);
   const pMove = player.state === 'light1' || player.state === 'light2' ||
-                player.state === 'heavy' || player.state === 'roll' ||
-                player.state === 'block';
+    player.state === 'heavy' || player.state === 'roll' ||
+    player.state === 'block';
   hud.innerHTML =
-`<span class="k">玩家</span>  HP <span class="p">${bar(player.hp, player.maxHp, 20)}</span> ${Math.round(player.hp)}
+    `<span class="k">玩家</span>  HP <span class="p">${bar(player.hp, player.maxHp, 20)}</span> ${Math.round(player.hp)}
       <span class="k">韧性</span> <span class="p">${bar(player.poise, player.maxPoise, 10)}</span>  <span class="k">无敌</span> ${player.iframe > 0 ? '<span class="warn">●' + player.iframe + '</span>' : '○'}
       <span class="k">状态</span> <span class="p">${stateLabel(player).padEnd(24)}</span> <span class="k">锁定</span> ${player.lockOn ? '<span class="p">ON</span>' : 'off'}
       ${player.state === 'block' ? guardBar(player) : (pMove ? frameBar(player) : '')}
@@ -1186,6 +1186,7 @@ fVfx.add(VFX_CFG, 'intensity', 0, 2, 0.05).name('强度');
 fVfx.add(VFX_CFG, 'slashLife', 0.4, 2.5, 0.05).name('刀光时长倍率');
 fVfx.add(VFX_CFG, 'sparkCount', 0, 40, 1).name('火花数量');
 fVfx.add(VFX_CFG, 'telegraph').name('Boss 起手预警');
+fVfx.add(VFX_CFG, 'telegraphStart', 0, 1, 0.05).name('起手亮度');
 
 function syncGUI() { gui.controllersRecursive().forEach((c) => c.updateDisplay()); }
 

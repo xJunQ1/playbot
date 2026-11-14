@@ -19,8 +19,9 @@ export const VFX_CFG = {
   intensity: 1.0,     // 全局亮度/数量倍率
   slashLife: 1.0,     // 刀光时长倍率（越大越「拖」）
   sparkCount: 18,     // 单次命中基础火花数（重击 ×1.6）
-  telegraph: true,         // Boss 起手预警（地面范围环 + 蓄力光）
+  telegraph: true,         // Boss 起手预警（起手帧手部红光）
   telegraphBossOnly: true, // 只给 Boss 挂；关掉的话玩家出招也会有
+  telegraphStart: 0.35,    // 起手第一帧就有的亮度（0 = 从全黑慢慢亮）
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -312,105 +313,117 @@ export class MeleeVFX {
   }
 
   // ── 生命周期 ───────────────────────────────────────────────
-  // ── Boss 起手预警 ──────────────────────────────────────────
+  // ── Boss 起手预警：手部红光 ────────────────────────────────
   /**
-   * 出招第一帧挂上，之后完全靠 actor 自己的帧号推进：
-   *   · 地面环 = 这一招 hitbox 的真实覆盖范围（读招，不是读 UI）
-   *   · 扫过弧 = 充能进度
-   *   · 聚集光 = 判定帧前最亮，这就是「要来了」的那一下 tell
-   * 判定帧一到 / 被打断 / 换招 → 0.08s 内淡出，不和刀光打架。
+   * 从「起手帧」第一帧就亮（telegraphStart 是起始亮度），越接近挥出越亮，
+   * 而且挂在右手/武器握把上 —— 抬手、举剑、蓄力都跟着骨骼走，不用算世界坐标。
+   * 判定帧一到或被打断，50ms 内熄灭，交给刀光接管。
    */
   telegraph(actor, move) {
     if (!VFX_CFG.telegraph || !actor || !move || !move.hitbox || move.active <= 0) return null;
 
-    const scale = actor.scale ?? 1;
-    const hb = move.hitbox;
-    const reach = Math.max(0.7, (hb.offset + hb.radius) * scale);
-    const stretch = move.swing === 'thrust' ? 1.55 : 1.0;
-    const color = move.swing === 'vertical' ? 0xff5a3c
-      : move.swing === 'thrust' ? 0x7fe0ff
-      : 0xffb45e;
+    const anchor = this._handAnchor(actor);
+    if (!anchor) return null;
 
-    const ringGeo = new THREE.RingGeometry(0.88, 1.0, 64).rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.position.copy(actor.pos);
-    ring.position.y = 0.03;
-    ring.renderOrder = 2;
-    ring.frustumCulled = false;
-    this.scene.add(ring);
+    // 注意：fighter 的 group 已经按 actor.scale 缩放过，这里一律用「局部单位」
+    const layerDefs = [
+      { size: 0.30, color: 0xff7a4a, opacity: 0.90 },  // 芯：亮到发白
+      { size: 0.66, color: 0xff3a10, opacity: 0.46 },  // 焰
+      { size: 1.30, color: 0xc01000, opacity: 0.20 },  // 晕：把空气也染红
+    ];
 
-    // 带缺口的环，转起来像在充能
-    const arcGeo = new THREE.RingGeometry(0.80, 0.90, 48, 1, 0, Math.PI * 1.4).rotateX(-Math.PI / 2);
-    const arcMat = new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-    });
-    const arc = new THREE.Mesh(arcGeo, arcMat);
-    arc.position.copy(ring.position);
-    arc.renderOrder = 2;
-    arc.frustumCulled = false;
-    this.scene.add(arc);
+    const sprites = [];
+    const mats = [];
+    const base = anchor.offset;
 
-    // 聚集光：悬在武器会扫过的高度
-    const glowMat = new THREE.SpriteMaterial({
-      map: tex().flash ?? null,
-      color,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const glow = new THREE.Sprite(glowMat);
-    glow.renderOrder = 3;
-    this.scene.add(glow);
+    for (const L of layerDefs) {
+      const mat = new THREE.SpriteMaterial({
+        map: tex().flash ?? null,
+        color: L.color,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const sp = new THREE.Sprite(mat);
+      sp.position.copy(base);
+      sp.scale.setScalar(L.size);
+      sp.renderOrder = 6;
+      anchor.obj.add(sp);
+      sprites.push(sp);
+      mats.push(mat);
+    }
 
-    let out = 1;
+    // 几粒往上飘的火星：红光要有热源，不然像贴纸
+    const embers = [];
+    for (let i = 0; i < 5; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: tex().spark ?? null,
+        color: 0xff9a5a,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const sp = new THREE.Sprite(mat);
+      sp.scale.setScalar(rand(0.04, 0.085));
+      sp.position.copy(base).add(new THREE.Vector3(
+        rand(-0.08, 0.08), rand(-0.06, 0.05), rand(-0.08, 0.08),
+      ));
+      sp.renderOrder = 6;
+      anchor.obj.add(sp);
+      sprites.push(sp);
+      mats.push(mat);
+      embers.push({ sp, mat, t: rand(0, 1), speed: rand(0.35, 0.8) });
+    }
+
+    const startBrightness = clamp(VFX_CFG.telegraphStart, 0, 1);
+    let out = 0;
     let age = 0;
     const token = {};
 
     const kill = () => {
-      this._drop(ring); this._drop(arc); this._drop(glow);
-      ringGeo.dispose(); arcGeo.dispose();
-      ringMat.dispose(); arcMat.dispose(); glowMat.dispose();
+      for (const sp of sprites) anchor.obj.remove(sp);
+      for (const m of mats) m.dispose();
     };
 
     const effect = {
       update: (dt) => {
         age += dt;
-        // token 保证「同一招重开」不会让旧特效复活
         const live = actor.__vfxTele === token
           && actor.move === move
           && actor.frame < move.startup
           && actor.state !== 'dead';
 
-        out = live ? Math.min(1, out + dt * 14) : out - dt * 12;
-        if (out <= 0) { kill(); return false; }
+        if (live) {
+          // 起手第一帧就有 startBrightness，之后线性涨到 1（挥出的瞬间最亮）
+          const p = clamp(actor.frame / Math.max(1, move.startup), 0, 1);
+          const target = startBrightness + (1 - startBrightness) * p;
+          out += (target - out) * Math.min(1, dt * 16);
+        } else {
+          out -= dt * 20;                       // ~50ms 熄灭
+          if (out <= 0.002) { kill(); return false; }
+        }
 
-        const p = clamp(actor.frame / Math.max(1, move.startup), 0, 1);
-        const k = out * clamp(VFX_CFG.intensity, 0, 2);
-        const s = reach * (0.34 + 0.66 * Math.pow(p, 0.75));
+        const k = clamp(VFX_CFG.intensity, 0, 2);
+        // 火焰不是恒定的：两个不同频率的正弦叠出「呼吸」
+        const flick = 0.84 + 0.10 * Math.sin(age * 31) + 0.06 * Math.sin(age * 79);
 
-        ring.position.copy(actor.pos); ring.position.y = 0.03;
-        ring.rotation.y = actor.yaw;
-        ring.scale.set(s, 1, s * stretch);
-        ringMat.opacity = (0.16 + 0.44 * p) * k;
+        for (let i = 0; i < layerDefs.length; i++) {
+          mats[i].opacity = layerDefs[i].opacity * out * flick * k;
+          sprites[i].scale.setScalar(layerDefs[i].size * (0.7 + 0.6 * out));
+        }
 
-        arc.position.copy(ring.position);
-        arc.rotation.y = actor.yaw + age * (2.2 + 5.0 * p);
-        arc.scale.set(s * 1.02, 1, s * stretch * 1.02);
-        arcMat.opacity = (0.20 + 0.55 * p) * k;
+        for (const e of embers) {
+          e.t += dt * e.speed;
+          if (e.t >= 1) {
+            e.t = 0;
+            e.sp.position.copy(base).add(new THREE.Vector3(
+              rand(-0.08, 0.08), rand(-0.06, 0.04), rand(-0.08, 0.08),
+            ));
+          }
+          e.sp.position.y += dt * e.speed * 0.45;
+          e.mat.opacity = Math.sin(e.t * Math.PI) * 0.85 * out * k;
+        }
 
-        const gp = (0.18 + 0.80 * p) * scale;
-        glow.position.set(
-          actor.pos.x + Math.sin(actor.yaw) * hb.offset * scale * 0.8,
-          (hb.yMin + hb.yMax) * 0.5 * scale * 0.85,
-          actor.pos.z + Math.cos(actor.yaw) * hb.offset * scale * 0.8,
-        );
-        glow.scale.setScalar(gp * 1.6 * (1 + 0.07 * Math.sin(age * 22)));
-        glowMat.opacity = Math.min(1, (0.18 + 0.72 * p) * k);
         return true;
       },
       dispose: kill,
@@ -419,6 +432,33 @@ export class MeleeVFX {
     actor.__vfxTele = token;
     this.effects.push(effect);
     return effect;
+  }
+
+  /** 找右手：灰盒用武器（把光放在握把上），真模型找 hand 骨骼 */
+  _handAnchor(actor) {
+    const m = actor?.mesh;
+    const weapon = m?.weapon;
+    if (weapon && weapon.isObject3D) {
+      const g = weapon.geometry;
+      if (g && typeof g.computeBoundingBox === 'function' && !g.boundingBox) g.computeBoundingBox();
+      const z0 = g?.boundingBox ? g.boundingBox.min.z : 0;
+      return { obj: weapon, offset: new THREE.Vector3(0, 0, z0 * 0.85) };
+    }
+    const root = actor?.binder?.root;
+    if (root) {
+      const hand = this._findBone(root, /righthand|right_hand|hand_r|handr/i);
+      if (hand) return { obj: hand, offset: new THREE.Vector3() };
+    }
+    return null;
+  }
+
+  _findBone(root, re) {
+    let found = null;
+    if (typeof root.traverse !== 'function') return null;
+    root.traverse((o) => {
+      if (!found && o.isBone && re.test(o.name ?? '')) found = o;
+    });
+    return found;
   }
   update(dt) {     if (!(dt > 0)) return;
     for (let i = this.effects.length - 1; i >= 0; i--) {
