@@ -1,7 +1,17 @@
 import * as THREE from 'three';
 import GUI from 'lil-gui';
 import { CFG, MOVES, LIMITS, totalFrames, motionAt, dumpJSON, moveIssues, validateAll } from './frame-data.js';
-import { makeFighter, makeArena, setupLights, createViz, placeViz, applyPose } from './graybox.js';
+import { makeFighter, createViz, placeViz, applyPose } from './graybox.js';
+import { buildStage, updateStage, ARENA_R } from './arena/stage.js';
+import { createSettings } from './settings.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { poseFor } from './pose.js';
 import { FootIK } from './footik.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
@@ -9,10 +19,18 @@ import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 // ═══════════════════════════════════════════════════════════════
 //  0. 渲染基础设施
 // ═══════════════════════════════════════════════════════════════
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// 关掉 MSAA：集成显卡上 4x MSAA 几乎等于把像素成本翻倍；改在后期用 FXAA，画质接近、成本极低
+const QSP = new URLSearchParams(location.search);
+const PRECISION = QSP.get('prec') === 'high' ? 'highp' : 'mediump';
+// 核显的片元单元对 highp 很敏感；mediump 在 1080p 下几乎看不出差别
+const renderer = new THREE.WebGLRenderer({ antialias: false, precision: PRECISION, powerPreference: 'high-performance' });
+// ── 画质开关（URL 参数）：?res=0.75 渲染倍率 / ?ao=0 关环境光遮蔽 / ?shadow=0 关阴影
+const QS = new URLSearchParams(location.search);
+const RES = Math.min(1.5, Math.max(0.5, parseFloat(QS.get('res') || '1')));
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2.0) * RES);
+renderer.info.autoReset = false;   // 自己每帧重置，才能在渲染后读到当帧的 draw call
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = QS.get('shadow') !== '0';
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -22,19 +40,145 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0c0e);
 scene.fog = new THREE.Fog(0x0b0c0e, 34, 62);
 
-const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 1200);
 camera.position.set(0, 6, 10);
 
-setupLights(scene);
-const ARENA = makeArena(scene, 30);
+// 擂台：和展示页共用 stage.js 里同一份美术（浮空要塞 · 猩红魔法竞技场）
+const STAGE = buildStage(scene, { magicOpacity: 0.42 });
+const ARENA = { half: STAGE.radius };   // 兼容旧引用，实际边界用圆形
 
 // 近战特效（刀光 / 命中火花 / 弹反），纯程序化，不依赖外部资源
 const vfx = new MeleeVFX(scene, { getCamera: () => camera });
 
+// ── 后处理：只开环境光遮蔽。贴地视角下凹缝（栏杆之间、台阶、浮雕、柱础）压暗，
+//   否则整个场地会像一张平面贴图。
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+// AO 分辨率：默认跟随画布；?ao=half 时 AO 只渲半分辨率（核显上收益最大的一项）
+const AO_HALF = QSP.get('ao') === 'half';
+const gtao = new GTAOPass(scene, camera, AO_HALF ? innerWidth >> 1 : innerWidth, AO_HALF ? innerHeight >> 1 : innerHeight);
+if (AO_HALF) {
+  const baseSetSize = gtao.setSize.bind(gtao);
+  gtao.setSize = (w, h) => baseSetSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
+}
+gtao.output = GTAOPass.OUTPUT.Default;
+gtao.updateGtaoMaterial({
+  radius: 0.85, distanceExponent: 1.4, thickness: 1.6, scale: 0.95,
+  samples: 8, distanceFallOff: 1.0, screenSpaceRadius: false,
+});
+gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 4, radiusExponent: 1, rings: 2, samples: 8 });
+composer.addPass(gtao);
+// 画质开关：?ao=0 关掉环境光遮蔽（低配机建议关，这是最贵的一项）
+if (location.search.includes('ao=0')) gtao.enabled = false;
+// 泛光：法阵、火盆、刀光的高光溢出一层，配合锐化能提升“通透感”
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.18, 0.6, 0.85);
+// 泛光暂不启用：UnrealBloomPass 与 GTAOPass 在这版 three 上冲突，整帧会变黑
+// bloom.setSize(innerWidth, innerHeight);
+// composer.addPass(bloom);
+
+composer.addPass(new OutputPass());
+
+// 锐化（unsharp mask，3x3）：把高频细节拉回来，抵消 FXAA/上采样带来的软
+const SharpenShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    resolution: { value: new THREE.Vector2(1, 1) },
+    strength: { value: 0.0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform vec2 resolution;
+    uniform float strength;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (strength <= 0.001) { gl_FragColor = c; return; }
+      vec2 px = 1.0 / resolution;
+      vec3 blur =
+        texture2D(tDiffuse, vUv + vec2(-px.x, 0.0)).rgb +
+        texture2D(tDiffuse, vUv + vec2( px.x, 0.0)).rgb +
+        texture2D(tDiffuse, vUv + vec2(0.0, -px.y)).rgb +
+        texture2D(tDiffuse, vUv + vec2(0.0,  px.y)).rgb;
+      blur *= 0.25;
+      vec3 sharpened = c.rgb + (c.rgb - blur) * (strength * 3.0);
+      gl_FragColor = vec4(clamp(sharpened, 0.0, 1.0), c.a);
+    }
+  `,
+};
+// FXAA：替代 MSAA 的抗锯齿，一个全屏 pass，成本远低于 4x MSAA
+const fxaa = new ShaderPass(FXAAShader);
+function syncFXAA() {
+  const pr = renderer.getPixelRatio();
+  fxaa.material.uniforms.resolution.value.set(1 / (innerWidth * pr), 1 / (innerHeight * pr));
+}
+syncFXAA();
+composer.addPass(fxaa);
+
+// SMAA：比 FXAA 保留更多细节，比 MSAA 便宜；和 FXAA 二选一
+const smaa = new SMAAPass(innerWidth, innerHeight);
+smaa.enabled = false;
+composer.addPass(smaa);
+
+// 锐化：放在 FXAA 之后，把被抗锯齿抹掉的细节补回来
+const sharpen = new ShaderPass(SharpenShader);
+function syncSharpen() {
+  const pr = renderer.getPixelRatio();
+  sharpen.material.uniforms.resolution.value.set(innerWidth * pr, innerHeight * pr);
+  sharpen.enabled = sharpen.material.uniforms.strength.value > 0.001;
+}
+syncSharpen();
+composer.addPass(sharpen);
+
+// ── 画质档位：低 / 中 / 高，Q 键循环
+//  只动「渲染分辨率 / 环境光遮蔽 / 装饰物件」，不改光照数量（改灯会触发着色器重编译）
+const QUALITY = {
+  low:  { res: 0.7,  ao: false, decor: false, label: '低' },
+  mid:  { res: 1.0,  ao: false, decor: true,  label: '中' },
+  high: { res: 1.0,  ao: true,  decor: true,  label: '高' },
+};
+let qualityName = QS.get('q') || 'high';
+let qualityRes = 1.0;
+function applyQuality(name) {
+  const q = QUALITY[name] ?? QUALITY.mid;
+  qualityName = name;
+  qualityRes = q.res;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2.0) * q.res * RES);
+  composer.setSize(innerWidth, innerHeight);
+  gtao.enabled = q.ao && QSP.get('ao') !== '0';   // URL 的 ?ao=0 优先，别被画质档覆盖
+  gtao.setSize(innerWidth, innerHeight);
+  STAGE.setDecor(q.decor);
+  const el = document.getElementById('banner');
+  if (el) {
+    el.textContent = `画质：${q.label}`;
+    el.classList.add('show');
+    clearTimeout(applyQuality._t);
+    applyQuality._t = setTimeout(() => el.classList.remove('show'), 900);
+  }
+}
+addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'q') {
+    const order = ['low', 'mid', 'high'];
+    const next = order[(order.indexOf((window.__settingsApi?.state().preset) || qualityName) + 1) % order.length];
+    if (window.__settingsApi) window.__settingsApi.applyPreset(next);
+    else applyQuality(next);
+  }
+});
+applyQuality(qualityName);
+// 预编译所有材质的着色器，避免第一次看到某个物体时卡一下
+renderer.compile(scene, camera);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  gtao.setSize(innerWidth, innerHeight);
+  syncFXAA();
+  syncSharpen();
+  smaa.setSize(innerWidth, innerHeight);
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -60,13 +204,37 @@ const BUFFER_WINDOW = 8;     // 输入缓冲 8 帧 ≈ 133ms
 // 那个时间戳早过期了 —— 表现就是「要点两次才进第二段」。
 const pressedAt = Object.create(null);
 
-const KEYMAP = {
-  KeyW: 'fwd', KeyS: 'back', KeyA: 'left', KeyD: 'right',
-  ShiftLeft: 'roll', Space: 'roll',
-  KeyJ: 'light', KeyK: 'heavy', KeyL: 'block',
+// 动作 -> 按键列表。可在设置页重绑定，存在 localStorage。
+const DEFAULT_KEYS = {
+  fwd: ['KeyW'], back: ['KeyS'], left: ['KeyA'], right: ['KeyD'],
+  roll: ['ShiftLeft', 'Space'],
+  light: ['KeyJ'], heavy: ['KeyK'], block: ['KeyL'],
 };
+const ACTION_KEYS = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem('souls-demo-keys') || 'null');
+    if (saved && typeof saved === 'object') return Object.assign({}, DEFAULT_KEYS, saved);
+  } catch (e) { /* 忽略 */ }
+  return JSON.parse(JSON.stringify(DEFAULT_KEYS));
+})();
+
+const KEYMAP = {};
+const CODES_BY_NAME = {};
+function rebuildKeymap() {
+  for (const k of Object.keys(KEYMAP)) delete KEYMAP[k];
+  for (const k of Object.keys(CODES_BY_NAME)) delete CODES_BY_NAME[k];
+  for (const [action, codes] of Object.entries(ACTION_KEYS)) {
+    for (const code of codes) {
+      KEYMAP[code] = action;
+      (CODES_BY_NAME[action] || (CODES_BY_NAME[action] = [])).push(code);
+    }
+  }
+  try { localStorage.setItem('souls-demo-keys', JSON.stringify(ACTION_KEYS)); } catch (e) { /* 忽略 */ }
+}
+rebuildKeymap();
 
 addEventListener('keydown', (e) => {
+  if (window.__recordingKey) { e.preventDefault(); return; }
   const k = KEYMAP[e.code];
   if (k) {
     e.preventDefault();
@@ -86,8 +254,6 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('contextmenu', (e) => e.preventDefault());
 addEventListener('mousedown', (e) => { if (e.button === 2) { e.preventDefault(); player.lockOn = !player.lockOn; } });
 
-const CODES_BY_NAME = {};
-for (const [code, name] of Object.entries(KEYMAP)) (CODES_BY_NAME[name] ??= []).push(code);
 const down = (name) => (CODES_BY_NAME[name] ?? []).some((c) => keys.has(c));
 /** 消费一次缓冲输入；window 帧内有效 */
 function consume(name, window = BUFFER_WINDOW) {
@@ -161,10 +327,35 @@ class Actor {
     this.clampToArena();
   }
 
+  /**
+   * 圆形台面约束：半径 = 台面半径 − 栏杆 − 自身半径。
+   * 沿径向夹住，贴边时顺着圆滑走，不像方形 clamp 那样卡在角上。
+   */
   clampToArena() {
-    const lim = ARENA.half - 0.8;
-    this.pos.x = THREE.MathUtils.clamp(this.pos.x, -lim, lim);
-    this.pos.z = THREE.MathUtils.clamp(this.pos.z, -lim, lim);
+    // ① 先解圆柱障碍（断柱 / 倒柱）：挡住就沿法线推出去，能贴着绕
+    for (const o of STAGE.obstacles) {
+      const dx = this.pos.x - o.x, dz = this.pos.z - o.z;
+      const min = o.r + this.hurt.radius;
+      const d = Math.hypot(dx, dz);
+      if (d < min) {
+        if (d > 1e-4) {
+          const k = min / d;
+          this.pos.x = o.x + dx * k;
+          this.pos.z = o.z + dz * k;
+        } else {
+          // 正好在柱心：没有方向可推，朝 +X 推到边缘
+          this.pos.x = o.x + min;
+        }
+      }
+    }
+    // ② 再夹圆形台面
+    const lim = ARENA_R - 1.8 - this.hurt.radius;
+    const d = Math.hypot(this.pos.x, this.pos.z);
+    if (d > lim && d > 1e-6) {
+      const k = lim / d;
+      this.pos.x *= k;
+      this.pos.z *= k;
+    }
   }
 
   /** 平滑转向，rate = 每帧最大弧度 */
@@ -602,7 +793,8 @@ function pickBossMove(dist) {
     if (!id.startsWith('b_')) continue;
     if (dist < m.minRange || dist > m.maxRange) continue;
     if (AI.recent.includes(id)) continue;
-    const ready = (logicFrame - (AI.cooldowns?.[id] ?? -999)) > m.cooldown * 60 * CFG.bossCooldownScale;
+    const cdScale = CFG.bossCooldownScale * (AI.phase2 ? 0.72 : 1);
+      const ready = (logicFrame - (AI.cooldowns?.[id] ?? -999)) > m.cooldown * 60 * cdScale;
     if (!ready) continue;
     // 距离越接近区间中心权重越高
     const mid = (m.minRange + m.maxRange) / 2;
@@ -680,10 +872,16 @@ function bossTick() {
         boss.stepMotion();
 
         if (boss.frame >= totalFrames(boss.move)) {
+          const finished = boss.moveId;
           boss.setState('idle');
           AI.lastMoveFrame = logicFrame;
-          AI.gapFrames = Math.round(CFG.bossComboGap * 60 * (0.7 + rng() * 0.6));
+          AI.gapFrames = Math.round(CFG.bossComboGap * 60 * (0.7 + rng() * 0.6) * (AI.phase2 ? 0.78 : 1));
           AI.feintChecked = false;
+          // 二阶段专属：突进结束后如果还在身前，立刻接一记下砸（二连）
+          if (AI.phase2 && finished === 'b_charge') {
+            const dd = Math.hypot(player.pos.x - boss.pos.x, player.pos.z - boss.pos.z);
+            if (dd < 8) { boss.setState('attack', 'b_slam'); AI.gapFrames = 0; }
+          }
         }
         return;
       }
@@ -699,6 +897,11 @@ function bossTick() {
         AI.feintChecked = false;
         boss.setState('attack', 'b_roar');
         boss.moving = false;
+        // 二阶段：场景推到血月（法阵转红、雾变浓、火盆变血焰）
+        STAGE.setPhase(2);
+        banner('第二阶段 · 血月', 1800);
+        shakeAmt = Math.max(shakeAmt, 0.9);
+        AI.gapFrames = 0;
         return;
       }
       if (!AI.phase3 && boss.hp < boss.maxHp * 0.25) {
@@ -878,6 +1081,20 @@ function lerpAngle(a, b, t) {
   return a + d * t;
 }
 
+/** 把相机瞬间对齐到「玩家身后、Boss 在正前方」，开场和重开时调用 */
+function snapCamera() {
+  const toBoss = boss.pos.clone().sub(player.pos).setY(0);
+  if (toBoss.lengthSq() < 1e-4) toBoss.set(0, 0, -1);
+  toBoss.normalize();
+  camYaw = Math.atan2(-toBoss.x, -toBoss.z);
+  const focus = player.pos.clone().add(new THREE.Vector3(0, 1.9, 0));
+  const dir = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
+  camPos.copy(focus).addScaledVector(dir, 8.6).add(new THREE.Vector3(0, 3.9, 0));
+  camTarget.copy(focus);
+  camera.position.copy(camPos);
+  camera.lookAt(camTarget);
+}
+
 function updateCamera(dtReal) {
   const focus = player.pos.clone().add(new THREE.Vector3(0, 1.9, 0));
   const dist = 8.6;
@@ -885,13 +1102,34 @@ function updateCamera(dtReal) {
   // 相机永远位于「玩家→Boss」的反向延长线上：Boss 恒定在画面正前方
   const { fwd } = screenBasis();
   const targetYaw = Math.atan2(-fwd.x, -fwd.z);
+  // 目标角与当前角最多每帧转 maxStep，避免 Boss 贴身绕圈时镜头疯狂旋转
+  const maxYawStep = 4.0 * Math.min(dtReal, 0.1);          // 约 230 度/秒上限
+  const prevYaw = camYaw;
   camYaw = lerpAngle(camYaw, targetYaw, 1 - Math.pow(0.002, dtReal));
+  let dYaw = ((camYaw - prevYaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  if (Math.abs(dYaw) > maxYawStep) camYaw = prevYaw + Math.sign(dYaw) * maxYawStep;
+  if (!Number.isFinite(camYaw)) camYaw = 0;
 
   const dir = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
   const desired = focus.clone().addScaledVector(dir, dist).add(new THREE.Vector3(0, 3.9, 0));
 
   const k = 1 - Math.pow(0.001, dtReal);
   camPos.lerp(desired, Math.min(1, k * 2.0));
+  if (!Number.isFinite(camPos.x) || !Number.isFinite(camPos.y) || !Number.isFinite(camPos.z)) {
+    camPos.copy(desired);
+  }
+
+  // 镜头约束：贴边战斗时镜头会退到台外。硬拉回来会让镜头贴脸，
+  // 所以改成「退出去多少就抬高多少」——越过台沿看进去，台沿和栏杆就不会挡住半个画面。
+  const camR = Math.hypot(camPos.x, camPos.z);
+  const hardMax = ARENA_R + 6;
+  if (camR > hardMax) {
+    const kk = hardMax / camR;
+    camPos.x *= kk;
+    camPos.z *= kk;
+  }
+  const over = Math.max(0, camR - (ARENA_R - 2.2));
+  camPos.y = Math.max(camPos.y, 3.6 + over * 0.9);
 
   const lookAtPoint = focus.clone();
   if (player.lockOn) {
@@ -986,6 +1224,8 @@ function updateGuardViz(a) {
 
 // ── 渲染 ──────────────────────────────────────────────────────
 function render(dtReal) {
+  updateStage(performance.now() / 1000, camera);
+  updateStage(performance.now() / 1000, camera);
   // 美术模型动画（灰盒可不接）
   const animDt = CFG.paused ? 0 : dtReal;   // 暂停时冻结动画，方便逐帧检查
   if (player.binder) player.binder.update(player, animDt);
@@ -1023,10 +1263,54 @@ function render(dtReal) {
   // 特效推进：顿帧时冻结（打在铁上那一下要「停」住）
   vfx.update(CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale);
 
-  renderer.render(scene, camera);
+  const _q = gpuTimer ? gpuTimer.begin() : null;
+  composer.render();
+  if (gpuTimer && _q) gpuTimer.end(_q);
+  if (window.__perf) { window.__perf.calls = renderer.info.render.calls; window.__perf.tris = renderer.info.render.triangles; }
+  renderer.info.reset();
 }
 
 // ── 主循环 ────────────────────────────────────────────────────
+
+// ── GPU 计时（EXT_disjoint_timer_query_webgl2）：直接问显卡这一帧花了多少毫秒
+const gpuTimer = (() => {
+  const gl = renderer.getContext();
+  const ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+  if (!ext) return null;
+  const pool = [];
+  return {
+    gl, ext,
+    begin() {
+      const q = pool.pop() || gl.createQuery();
+      gl.beginQuery(ext.TIME_ELAPSED_EXT, q);
+      return q;
+    },
+    end(q) {
+      gl.endQuery(ext.TIME_ELAPSED_EXT);
+      q.__pending = true;
+      pool.push(q);
+      if (pool.length > 6) {
+        const old = pool.shift();
+        if (old.__pending) gl.deleteQuery(old);
+      }
+    },
+    read() {
+      let ms = null;
+      for (const q of pool) {
+        if (!q.__pending) continue;
+        if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
+          const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT);
+          if (!disjoint) ms = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6;
+          q.__pending = false;
+        }
+      }
+      return ms;
+    },
+  };
+})();
+let __fpsFrames = 0, __fpsAcc = 0, __fps = 0;
+
+
 function loop(now) {
   requestAnimationFrame(loop);
   const dtReal = Math.min((now - lastTime) / 1000, 0.1);
@@ -1044,6 +1328,12 @@ function loop(now) {
 
   render(dtReal);
   updateHUD();
+
+  __fpsFrames++; __fpsAcc += dtReal;
+  if (__fpsAcc >= 0.5) {
+    __fps = Math.round(__fpsFrames / __fpsAcc); __fpsFrames = 0; __fpsAcc = 0;
+    window.__perf = { fps: __fps, q: qualityName, ratio: +renderer.getPixelRatio().toFixed(2), ao: gtao.enabled, gpuMs: gpuTimer ? +(gpuTimer.read() ?? 0).toFixed(2) : null };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1123,7 +1413,7 @@ function updateHUD() {
       <span class="k">状态</span> <span class="b">${stateLabel(boss).padEnd(24)}</span> ${boss.hp < boss.maxHp * 0.55 ? '<span class="warn">二阶段</span>' : '<span class="k">一阶段</span>'}
       ${frameBar(boss)}
 
-<span class="k">逻辑帧</span> ${logicFrame}   <span class="k">hitstop</span> ${hitstopFrames}   <span class="k">倍速</span> ${CFG.timeScale}x`;
+<span class="k">逻辑帧</span> ${logicFrame}   <span class="fps"><span class="k">FPS</span> <span class="p">${__fps}</span>   </span><span class="k">画质</span> ${(QUALITY[qualityName] ?? QUALITY.mid).label}   <span class="k">hitstop</span> ${hitstopFrames}   <span class="k">倍速</span> ${CFG.timeScale}x`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1252,6 +1542,8 @@ function resetFight() {
   AI.recent = [];
   AI.lastMoveFrame = -999;
   AI.gapFrames = 90;
+  STAGE.setPhase(1);
+  if (typeof snapCamera === 'function') snapCamera();
   AI.cooldowns = {};
   rng = mulberry32(0xC0FFEE);
   logicFrame = 0;
@@ -1362,11 +1654,38 @@ function resetFight() {
 // 启动
 // ═══════════════════════════════════════════════════════════════
 // 调试接口：控制台里可以直接查状态、脚的世界坐标
+// GPU 探测：运行时读，不是写死的。不同机器会得到不同结果。
+window.__gpuInfo = (() => {
+  const gl = renderer.getContext();
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer0 = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  const vendor0 = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+  return { renderer: String(renderer0 || ''), vendor: String(vendor0 || ''), masked: !dbg, webgpu: 'gpu' in navigator };
+})();
+window.__gpu = window.__gpuInfo.renderer || 'unknown';
+
 window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI };
 
 // 启动时校验一遍帧数据上限，越界的招式直接打到 console
 const frameIssues = validateAll();
 
 resetFight();
+applyQuality(qualityName);
+
+// 设置页（Esc / 右下角齿轮）
+const settings = createSettings({
+  sharpen, syncSharpen, bloom, smaa, fxaa,
+  renderer, composer, gtao, camera, scene, STAGE, CFG,
+  gpuName: window.__gpu,
+  keymap: ACTION_KEYS,
+  defaultKeys: DEFAULT_KEYS,
+  onKeymapChange: rebuildKeymap,
+  onPreset: (name) => { qualityName = name; },
+});
+window.__settingsApi = settings;
+settings.bind();
+// 预编译所有材质的着色器，避免第一次看到某个物体时卡一下
+renderer.compile(scene, camera);
+snapCamera();
 requestAnimationFrame(loop);
 banner(frameIssues.length ? `帧数据越界 ${frameIssues.length} 项 · 见 console` : '按 J 开打', 1800);

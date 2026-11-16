@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>body{margin:0;background:#111}canvas{display:block}</style></head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(600, 400);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x203040);
+const cam = new THREE.PerspectiveCamera(50, 1.5, 0.1, 100);
+cam.position.set(2, 2, 3); cam.lookAt(0, 0, 0);
+scene.add(new THREE.DirectionalLight(0xffffff, 3).translateY(5));
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+// 一张程序化贴图，和游戏里的用法一致
+const c = document.createElement('canvas'); c.width = c.height = 64;
+const g = c.getContext('2d'); g.fillStyle = '#c80'; g.fillRect(0, 0, 64, 64);
+g.fillStyle = '#036'; g.fillRect(0, 0, 32, 32);
+const tex = new THREE.CanvasTexture(c);
+tex.colorSpace = THREE.SRGBColorSpace;
+
+const mesh = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, metalness: 0.1 })
+);
+scene.add(mesh);
+
+let n = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  mesh.rotation.y += 0.01;
+  renderer.render(scene, cam);
+  if (++n === 30) { window.__minOk = true; }
+}
+loop();
+</script>
+</body></html>
