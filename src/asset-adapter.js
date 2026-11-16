@@ -459,6 +459,57 @@ function blendUpperLower(upperClip, lowerClip, name, opts = {}) {
 }
 
 /** 往已绑定的 binder 上追加一批外部动画剪辑 */
+/**
+ * 压低某个剪辑里的手臂摆动幅度。
+ *
+ * 做法：每根手臂骨骼的四元数轨道，朝**首帧基准**做 slerp 压缩 ——
+ * factor = 0.25 表示只保留 25% 的摆幅。只改旋转轨道，根骨骼位移、
+ * 腿和躯干的轨道完全不碰，所以步频、脚步、身体前倾都不受影响。
+ *
+ * @param {Map<string, THREE.AnimationClip>} clips binder.clips
+ * @param {string[]} names 剪辑名（Walking / Running ...）
+ * @param {number} factor 0 = 手臂完全不动，1 = 原样
+ * @param {RegExp} boneRe 骨骼名匹配（默认肩 + 大臂 + 小臂）
+ * @returns {number} 实际处理了多少条轨道
+ */
+export function dampenArmSwing(
+  clips,
+  names,
+  factor = 0.25,
+  boneRe = /(LeftArm|RightArm|LeftForeArm|RightForeArm|LeftShoulder|RightShoulder)$/i,
+) {
+  if (!(factor >= 0 && factor < 1)) return 0;
+
+  const q = new THREE.Quaternion();
+  const base = new THREE.Quaternion();
+  const tmp = new THREE.Quaternion();
+  let count = 0;
+
+  for (const name of names) {
+    const clip = clips.get(name);
+    if (!clip) continue;
+
+    for (const track of clip.tracks) {
+      if (!track.name.endsWith('.quaternion')) continue;
+      const bone = track.name.slice(0, -'.quaternion'.length);
+      if (!boneRe.test(bone)) continue;
+
+      const n = track.values.length / 4;
+      if (n < 2) continue;
+
+      base.fromArray(track.values, 0);
+      for (let i = 1; i < n; i++) {
+        q.fromArray(track.values, i * 4);
+        // 四元数 q 和 -q 是同一个旋转；不同半球做 slerp 会绕远路
+        if (q.dot(base) < 0) q.set(-q.x, -q.y, -q.z, -q.w);
+        tmp.copy(base).slerp(q, factor);
+        tmp.toArray(track.values, i * 4);
+      }
+      count++;
+    }
+  }
+  return count;
+}
 export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
   if (!binder || !binder.loader) return 0;
   const entries = Object.entries(pack);
@@ -746,7 +797,8 @@ export async function bindModel(actor, url, opts = {}) {
   // 那样 Promise.all 会 reject，window.__dbg 都挂不上，整个 demo 停摆。
   if (opts.weaponModel) {
     try {
-      await attachWeaponModel(binder, opts.weaponModel, opts.weaponOpts ?? {});
+      const weapon = await attachWeaponModel(binder, opts.weaponModel, opts.weaponOpts ?? {});
+      if (weapon) actor.weapon = weapon;   // 供「拖刀」等状态切换用
     } catch (e) {
       console.error('[weapon] 挂载失败:', e);
     }
