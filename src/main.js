@@ -15,6 +15,7 @@ import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { poseFor } from './pose.js';
 import { FootIK } from './footik.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
+import { GroundScratch } from './vfx/scratch.js';
 
 // ═══════════════════════════════════════════════════════════════
 //  0. 渲染基础设施
@@ -49,6 +50,9 @@ const ARENA = { half: STAGE.radius };   // 兼容旧引用，实际边界用圆�
 
 // 近战特效（刀光 / 命中火花 / 弹反），纯程序化，不依赖外部资源
 const vfx = new MeleeVFX(scene, { getCamera: () => camera });
+
+// 拖刀划痕：贴地光带，寿命到了自动消失
+const scratch = new GroundScratch(scene);   // 参数在 scratch.js 顶部统一调
 
 // ── 后处理：只开环境光遮蔽。贴地视角下凹缝（栏杆之间、台阶、浮雕、柱础）压暗，
 //   否则整个场地会像一张平面贴图。
@@ -1222,6 +1226,103 @@ function updateGuardViz(a) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Boss 的镰刀：待机 / 走路时拖在身后
+//
+// 关键：拖刀姿态在**世界空间**里算，握把高度写死 —— 走路动画的髋部
+// 起伏传不到刀上，所以不会上下颠；只跟 Boss 的水平位置和朝向走。
+// 攻击 / 受击 / 死亡时把刀交回右手，恢复原来的局部变换。
+// ═══════════════════════════════════════════════════════════════
+const DRAG = {
+  enabled: true,
+  back: 0.02,     // 握把相对右手再往后挪多少（米）
+  height: 0.92,   // 握把离地高度（固定，不随走路起伏）
+  elev: 0.45,     // 刀杆俯角（弧度）：刀尖正好落在地面
+  roll: 0,        // 绕刀杆自转：调刀刃朝上 / 朝地
+};
+
+let dragState = null;
+const _dragDir = new THREE.Vector3();
+const _dragAxisY = new THREE.Vector3(0, 1, 0);
+const _dragQuat = new THREE.Quaternion();
+const _dragRoll = new THREE.Quaternion();
+const _dragHandPos = new THREE.Vector3();
+
+function setupDragWeapon() {
+  const w = boss.weapon;
+  if (!w || dragState) return;
+
+  const q = new URLSearchParams(location.search);
+  DRAG.enabled = q.get('drag') !== '0';
+  const num = (name, key) => {
+    const v = q.get(name);
+    if (v != null && Number.isFinite(Number(v))) DRAG[key] = Number(v);
+  };
+  num('dback', 'back');
+  num('dh', 'height');
+  num('delev', 'elev');
+  num('droll', 'roll');
+
+  dragState = {
+    obj: w,
+    hand: w.parent,
+    pos: w.position.clone(),
+    quat: w.quaternion.clone(),
+    scale: w.scale.clone(),
+    onHand: true,
+  };
+}
+
+function updateDragWeapon() {
+  const d = dragState;
+  if (!d) return;
+
+  // Boss 只有 idle（含踱步/绕圈）和 move 算「非战斗」
+  const wantDrag = DRAG.enabled && (boss.state === 'idle' || boss.state === 'move');
+
+  if (wantDrag && d.onHand) {
+    scene.attach(d.obj);          // 保留世界变换，脱离手骨
+    d.onHand = false;
+  } else if (!wantDrag && !d.onHand) {
+    d.hand.add(d.obj);            // 交回右手
+    d.obj.scale.copy(d.scale);
+    // 按调参面板的当前角度重新钉一次 —— 别把刚调好的武器朝向冲掉
+    if (typeof applyBossWeapon === 'function') applyBossWeapon();
+    d.onHand = true;
+  }
+
+  if (d.onHand) return;
+
+  // 刀杆方向：从握把指向刀头，朝身后 + 朝下
+  const yaw = boss.yaw;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  const ce = Math.cos(DRAG.elev), se = Math.sin(DRAG.elev);
+  _dragDir.set(-fx * ce, -se, -fz * ce).normalize();
+
+  // 模型局部 +Y 就是「握把 → 刀头」，转过去即可
+  _dragQuat.setFromUnitVectors(_dragAxisY, _dragDir);
+  if (DRAG.roll) {
+    _dragRoll.setFromAxisAngle(_dragDir, DRAG.roll);
+    _dragQuat.premultiply(_dragRoll);
+  }
+
+  // 握把钉在右手正下方：只跟手的水平位置，高度写死 —— 所以不会上下颠
+  d.hand.updateWorldMatrix(true, false);
+  _dragHandPos.setFromMatrixPosition(d.hand.matrixWorld);
+  d.obj.position.set(
+    _dragHandPos.x - fx * DRAG.back,
+    DRAG.height,
+    _dragHandPos.z - fz * DRAG.back,
+  );
+  d.obj.quaternion.copy(_dragQuat);
+
+  // 刀刃落点贴地 → 在地面留一道划痕（只在拖刀状态产生）
+  const tipLen = 2.05;
+  scratch.emit(
+    d.obj.position.x + _dragDir.x * tipLen,
+    d.obj.position.z + _dragDir.z * tipLen,
+  );
+}
 // ── 渲染 ──────────────────────────────────────────────────────
 function render(dtReal) {
   updateStage(performance.now() / 1000, camera);
@@ -1233,6 +1334,10 @@ function render(dtReal) {
 
   player.syncMesh();
   boss.syncMesh();
+
+  // 走路拖刀：世界空间定位，所以不会被走路动画带着上下颠
+  updateDragWeapon();
+  scratch.update(CFG.paused ? 0 : dtReal * CFG.timeScale);
 
   // 判定可视化
   const pv = activeHitbox(player);
@@ -1550,6 +1655,7 @@ function resetFight() {
   hitstopFrames = 0;
   shakeAmt = 0;
   vfx.clear();
+  scratch.clear();
   player.footIK.reset(player);
   boss.footIK.reset(boss);
   bannerEl.classList.remove('show');
@@ -1577,7 +1683,7 @@ function resetFight() {
   if (!pUrl && !bUrl) return;
 
   try {
-    const { bindModel, loadAnimationPack } = await import('./asset-adapter.js');
+    const { bindModel, loadAnimationPack, dampenArmSwing } = await import('./asset-adapter.js');
     banner('加载模型…', 1500);
     await Promise.all([
       pUrl ? bindModel(player, pUrl, {
@@ -1640,9 +1746,18 @@ function resetFight() {
       banner('加载动作包…', 1200);
       const actors = [player, boss].filter((a) => a.binder);
       const counts = await Promise.all(actors.map((a) => loadAnimationPack(a.binder)));
+
+      // Boss 走路摆臂太大：只保留 25% 摆幅（?barm=0 锁死手臂，?barm=1 复原）
+      // 只处理移动类剪辑，攻击/翻滚/受击的甩臂原样保留。
+      const armFactor = Number(q.get('barm') ?? 0.25);
+      if (boss.binder && armFactor < 1) {
+        const n = dampenArmSwing(boss.binder.clips, ['Walking', 'Running'], armFactor);
+        console.log('[anim-pack] boss 摆臂压缩轨迹数:', n, 'factor:', armFactor);
+      }
       console.log('[anim-pack] clips loaded per actor:', counts);
     }
 
+    setupDragWeapon();
     banner('模型就位', 1200);
   } catch (err) {
     console.warn('[asset] 模型加载失败，保持灰盒：', err);
@@ -1665,6 +1780,7 @@ window.__gpuInfo = (() => {
 window.__gpu = window.__gpuInfo.renderer || 'unknown';
 
 window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI };
+window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI, vfx, scratch };
 
 // 启动时校验一遍帧数据上限，越界的招式直接打到 console
 const frameIssues = validateAll();
