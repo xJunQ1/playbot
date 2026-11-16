@@ -26,3 +26,11 @@ Thumbs.db
 # 日志
 *.log
 npm-debug.log*
+
+# 截图与临时分析产物（体积大，不入库）
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.webp
+docs/*.py
+docs/*.txt

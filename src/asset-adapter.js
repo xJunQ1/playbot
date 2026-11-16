@@ -459,6 +459,57 @@ function blendUpperLower(upperClip, lowerClip, name, opts = {}) {
 }
 
 /** 往已绑定的 binder 上追加一批外部动画剪辑 */
+/**
+ * 压低某个剪辑里的手臂摆动幅度。
+ *
+ * 做法：每根手臂骨骼的四元数轨道，朝**首帧基准**做 slerp 压缩 ——
+ * factor = 0.25 表示只保留 25% 的摆幅。只改旋转轨道，根骨骼位移、
+ * 腿和躯干的轨道完全不碰，所以步频、脚步、身体前倾都不受影响。
+ *
+ * @param {Map<string, THREE.AnimationClip>} clips binder.clips
+ * @param {string[]} names 剪辑名（Walking / Running ...）
+ * @param {number} factor 0 = 手臂完全不动，1 = 原样
+ * @param {RegExp} boneRe 骨骼名匹配（默认肩 + 大臂 + 小臂）
+ * @returns {number} 实际处理了多少条轨道
+ */
+export function dampenArmSwing(
+  clips,
+  names,
+  factor = 0.25,
+  boneRe = /(LeftArm|RightArm|LeftForeArm|RightForeArm|LeftShoulder|RightShoulder)$/i,
+) {
+  if (!(factor >= 0 && factor < 1)) return 0;
+
+  const q = new THREE.Quaternion();
+  const base = new THREE.Quaternion();
+  const tmp = new THREE.Quaternion();
+  let count = 0;
+
+  for (const name of names) {
+    const clip = clips.get(name);
+    if (!clip) continue;
+
+    for (const track of clip.tracks) {
+      if (!track.name.endsWith('.quaternion')) continue;
+      const bone = track.name.slice(0, -'.quaternion'.length);
+      if (!boneRe.test(bone)) continue;
+
+      const n = track.values.length / 4;
+      if (n < 2) continue;
+
+      base.fromArray(track.values, 0);
+      for (let i = 1; i < n; i++) {
+        q.fromArray(track.values, i * 4);
+        // 四元数 q 和 -q 是同一个旋转；不同半球做 slerp 会绕远路
+        if (q.dot(base) < 0) q.set(-q.x, -q.y, -q.z, -q.w);
+        tmp.copy(base).slerp(q, factor);
+        tmp.toArray(track.values, i * 4);
+      }
+      count++;
+    }
+  }
+  return count;
+}
 export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
   if (!binder || !binder.loader) return 0;
   const entries = Object.entries(pack);
@@ -627,18 +678,35 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   // 只沿长轴缩放：等比放大会让剑「又长又宽」，
   // 真实加长兵器是拉长刃身、截面不变。另外两轴保持模型原始尺寸。
   model.scale.set(1, 1, 1);
-  model.scale.setComponent(AXIS_IDX, k);
+  if (opts.uniform) {
+    // 镰刀 / 锤子 / 斧这类「长宽比不能改」的武器：整体等比缩放，
+    // 否则只拉长轴会把刀头压成一条线。
+    model.scale.setScalar(k);
+  } else {
+    // 剑 / 枪这类：只拉长轴，截面不变
+    model.scale.setComponent(AXIS_IDX, k);
+  }
 
   // ② 柄端
-  // jian.glb 的柄在 **-Z** 端（预览页里深色部分是柄，位于观察者远端）。
-  // 测量结果：grip=-1 时剑尖世界方向 (0, 0.23, -0.97) —— 朝前略上抬，正确。
+  // gripEnd 决定「柄」在长轴哪一端；gripShift = 沿长轴从柄端往刃端的偏移比例(0~1)。
+  //   - 剑：柄在最底端，gripShift≈0
+  //   - 镰刀/长柄：通常要握在轴中段，gripShift 取 0.3~0.6
   const gripSign = opts.gripEnd ?? -1;
-  // 柄端在长轴上的坐标（模型局部）
-  const gripAxisValue = gripSign > 0 ? box.max.getComponent(AXIS_IDX) : box.min.getComponent(AXIS_IDX);
+  const axisMin = box.min.getComponent(AXIS_IDX);
+  const axisMax = box.max.getComponent(AXIS_IDX);
+  const axisLen = axisMax - axisMin;
+  const gripEndValue = gripSign > 0 ? axisMax : axisMin;
+  const gripDir = gripSign > 0 ? -1 : 1;      // 从柄端指向刃端的方向
+  let gripShift = opts.gripShift ?? 0;         // 0 = 柄端，1 = 刃端
+  let gripAxisValue = gripEndValue + gripDir * gripShift * axisLen;
 
   // ③ 转轴：长轴对齐到 +Y，再由外层 Group 转到「朝前」
   const inner = new THREE.Group();
-  inner.add(model);
+  // 绕武器自身长轴的滚转：决定镰刀刃朝上 / 朝侧 / 朝下
+  const rollGroup = new THREE.Group();
+  rollGroup.rotation.y = opts.roll ?? 0;
+  rollGroup.add(model);
+  inner.add(rollGroup);
   if (opts.alignAxis === 'z') inner.rotation.x = -Math.PI / 2;
   else if (opts.alignAxis === 'x') inner.rotation.z = Math.PI / 2;
 
@@ -652,41 +720,62 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   // ④ 精确对齐：找到「柄末端那一圈的顶点」的几何中心，
   //    然后平移 outer，让它正好落在掌心。
   //
-  //    之前用「手掌到模型的最近点」当指标，剑朝前之后这个指标会失效 ——
-  //    剑身中段可能比柄端更靠近手。必须直接锁定柄端顶点。
-  const handInv = hand.matrixWorld.clone().invert();
-  hand.updateMatrixWorld(true);
-  outer.position.set(0, 0, 0);
-  outer.updateMatrixWorld(true);
-
+  //    关键：旋转 outer 时，柄重心也会跟着转 —— 所以每次改 rotation
+  //    都要重新测一次柄重心、再补一次平移，武器才会「绕柄转」：
+  //    柄始终钉在掌心，只有刃身绕柄甩。只算一次的话，一调角度柄就飞出手。
   const tol = Math.abs(box.max.getComponent(AXIS_IDX) - box.min.getComponent(AXIS_IDX)) * 0.03;
-  const gripSum = new THREE.Vector3();
-  let gripCount = 0;
-  const vtmp = new THREE.Vector3();
-  model.traverse((o) => {
-    if (!o.isMesh) return;
-    const pa = o.geometry.attributes.position;
-    const step = Math.max(1, Math.floor(pa.count / 4000));
-    for (let i = 0; i < pa.count; i += step) {
-      vtmp.fromBufferAttribute(pa, i);
-      if (Math.abs(vtmp.getComponent(AXIS_IDX) - gripAxisValue) < tol) {
-        // 模型局部 → 世界 → 手骨局部
-        vtmp.applyMatrix4(o.matrixWorld).applyMatrix4(handInv);
-        gripSum.add(vtmp);
-        gripCount++;
-      }
-    }
-  });
+  // 掌心位置（手骨局部）：手指沿 +Y，掌心偏 +X
+  const target = new THREE.Vector3(
+    (opts.palmSide ?? 0.03) / sf,
+    (opts.palmOffset ?? 0.06) / sf,
+    0,
+  );
 
-  if (gripCount > 0) {
-    const gripInHand = gripSum.divideScalar(gripCount);
-    // 掌心位置（手骨局部）：手指沿 +Y，掌心偏 +X
-    const palmY = (opts.palmOffset ?? 0.06) / sf;
-    const palmX = (opts.palmSide ?? 0.03) / sf;
-    const target = new THREE.Vector3(palmX, palmY, 0);
-    outer.position.copy(target.sub(gripInHand));
+  /** 测出「柄端顶点圈」在手骨局部空间的几何中心（要求 rotation 已就位、position 归零） */
+  function measureGripInHand() {
+    outer.position.set(0, 0, 0);
+    outer.updateMatrixWorld(true);
+    hand.updateMatrixWorld(true);
+    const handInv = hand.matrixWorld.clone().invert();
+    const sum = new THREE.Vector3();
+    let n = 0;
+    const v = new THREE.Vector3();
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      const pa = o.geometry.attributes.position;
+      const step = Math.max(1, Math.floor(pa.count / 4000));
+      for (let i = 0; i < pa.count; i += step) {
+        v.fromBufferAttribute(pa, i);
+        if (Math.abs(v.getComponent(AXIS_IDX) - gripAxisValue) < tol) {
+          // 模型局部 → 世界 → 手骨局部
+          v.applyMatrix4(o.matrixWorld).applyMatrix4(handInv);
+          sum.add(v);
+          n++;
+        }
+      }
+    });
+    return n > 0 ? sum.divideScalar(n) : null;
+  }
+
+  /** 绕柄重新对齐：改完 outer.rotation / rollGroup.rotation 后调用一次 */
+  function realign() {
+    const g = measureGripInHand();
+    // 注意：先 copy 再 sub，避免原地修改 target（会累积偏移）
+    if (g) outer.position.copy(target).sub(g);
     outer.updateMatrixWorld(true);
   }
+  realign();
+
+  /** 沿长轴挪握点：0 = 柄端，1 = 刃端（镰刀/长柄武器常要握在中段） */
+  function setGripShift(s) {
+    gripShift = Math.min(1, Math.max(0, s));
+    gripAxisValue = gripEndValue + gripDir * gripShift * axisLen;
+    realign();
+  }
+
+  // 暴露给调参面板 / 控制台：改完角度后调 realign()，柄会重新钉回掌心
+  outer.userData.weapon = { realign, rollGroup, target, setGripShift, getGripShift: () => gripShift };
+  if (binder) binder.weaponGroup = outer;
 
   return outer;
 }
@@ -708,7 +797,8 @@ export async function bindModel(actor, url, opts = {}) {
   // 那样 Promise.all 会 reject，window.__dbg 都挂不上，整个 demo 停摆。
   if (opts.weaponModel) {
     try {
-      await attachWeaponModel(binder, opts.weaponModel, opts.weaponOpts ?? {});
+      const weapon = await attachWeaponModel(binder, opts.weaponModel, opts.weaponOpts ?? {});
+      if (weapon) actor.weapon = weapon;   // 供「拖刀」等状态切换用
     } catch (e) {
       console.error('[weapon] 挂载失败:', e);
     }

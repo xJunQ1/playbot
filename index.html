@@ -22,6 +22,7 @@
   #hud .fb-a { color:#ff5a5a; }
   #hud .fb-r { color:#59616c; }
   #hud .dim { opacity:.24; }
+  #hud.no-fps .fps { display:none; }
   #hud .cur { color:#ffffff; font-weight:700; }
   #help {
     position:fixed; left:16px; bottom:14px; z-index:10;
@@ -37,6 +38,66 @@
   }
   #banner.show { opacity:1; }
   #banner.dead { color:#ff4d4d; }
+  /* ── 设置面板 ── */
+  #gear {
+    position:fixed; left:16px; bottom:74px; z-index:30;
+    width:38px; height:38px; border-radius:50%; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    font:16px/1 system-ui; color:#cfd3d8;
+    background:rgba(24,20,32,.78); border:1px solid #3d3550;
+    transition:.15s;
+  }
+  #gear:hover { color:#fff; border-color:#8d7bb0; transform:rotate(18deg); }
+  #settings {
+    position:fixed; inset:0; z-index:40; display:none;
+    background:rgba(8,6,12,.86); backdrop-filter:blur(6px);
+    font:13px/1.6 "Segoe UI",system-ui,sans-serif; color:#d8d2e4;
+  }
+  #settings.open { display:flex; align-items:center; justify-content:center; }
+  #settings .panel {
+    width:min(920px,92vw); max-height:86vh; overflow:auto;
+    background:linear-gradient(180deg,#1b1626,#141019);
+    border:1px solid #423a56; border-radius:14px;
+    box-shadow:0 24px 80px rgba(0,0,0,.7);
+  }
+  #settings h2 {
+    margin:0; padding:18px 24px; font:600 16px/1 system-ui; letter-spacing:.12em;
+    border-bottom:1px solid #2c2540; color:#f0e8ff;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #settings h2 small { font-size:11px; letter-spacing:0; color:#8d84a3; font-weight:400; }
+  #settings .grid { display:grid; grid-template-columns:1fr 1fr; gap:0 28px; padding:8px 24px 4px; }
+  #settings .sec { padding:14px 0; border-bottom:1px solid #241e34; }
+  #settings .sec h3 { margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em; }
+  #settings .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:9px 0; }
+  #settings .row label { color:#cfc6de; }
+  #settings .row .val { color:#8fd3ff; font-variant-numeric:tabular-nums; min-width:64px; text-align:right; }
+  #settings select, #settings input[type=range] { background:#221c30; border:1px solid #3a3250; color:#e6dff5; border-radius:6px; }
+  #settings select { padding:5px 8px; min-width:140px; }
+  #settings input[type=range] { width:160px; }
+  #settings .pill { display:flex; gap:6px; }
+  #settings .pill button {
+    padding:5px 12px; border-radius:999px; cursor:pointer; font:12px system-ui;
+    background:#221c30; border:1px solid #3a3250; color:#a99cc4;
+  }
+  #settings .pill button.on { background:#4a3a72; border-color:#8d7bb0; color:#fff; }
+  #settings .keys { display:grid; grid-template-columns:repeat(4,1fr); gap:8px 18px; }
+  #settings .keys .krow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 0; }
+  #settings .keys .krow span { color:#cfc6de; }
+  #settings .keys .krow button {
+    min-width:74px; padding:4px 10px; border-radius:6px; cursor:pointer; font:12px ui-monospace,Consolas,monospace;
+    background:#221c30; border:1px solid #3a3250; color:#8fd3ff;
+  }
+  #settings .keys .krow button.rec { border-color:#ff9a4d; color:#ffb066; }
+  #settings .info { padding:14px 24px; font:12px/1.8 ui-monospace,Consolas,monospace; color:#8d84a3; }
+  #settings .info b { color:#cfc6de; font-weight:600; }
+  #settings .info .warn { color:#ffb066; }
+  #settings .foot { padding:14px 24px 18px; display:flex; justify-content:flex-end; gap:10px; }
+  #settings .foot button {
+    padding:8px 18px; border-radius:8px; cursor:pointer; font:13px system-ui;
+    background:#2a2340; border:1px solid #463c60; color:#d8d2e4;
+  }
+  #settings .foot button.primary { background:#5b47a0; border-color:#8d7bb0; color:#fff; }
 </style>
 </head>
 <body>
@@ -46,6 +107,102 @@
   <b>F1</b> 判定框 &nbsp; <b>F2</b> 慢放0.25x &nbsp; <b>F3</b> 暂停 &nbsp; <b>R</b> 重开 &nbsp; <b>P</b> 导出帧表JSON
 </div>
 <div id="banner"></div>
+<button id="gear" title="设置 (Esc)">⚙</button>
+<div id="settings">
+  <div class="panel">
+    <h2>设置 <small>Esc 关闭 · 改动即时生效并记住</small></h2>
+    <div class="grid">
+      <div class="sec">
+        <h3>画质</h3>
+        <div class="row"><label>预设</label>
+          <div class="pill" id="setPreset">
+            <button data-q="low">低</button><button data-q="mid">中</button><button data-q="high">高</button>
+          </div>
+        </div>
+        <div class="row"><label>渲染倍率</label>
+          <input id="setRes" type="range" min="0.6" max="1.5" step="0.05"><span class="val" id="setResVal"></span>
+        </div>
+        <div class="row"><label>环境光遮蔽</label>
+          <select id="setAO">
+            <option value="off">关（最快）</option>
+            <option value="low">低（8 采样）</option>
+            <option value="mid">中（16 采样）</option>
+            <option value="high">高（24 采样）</option>
+          </select>
+        </div>
+        <div class="row"><label>阴影</label>
+          <div class="pill" id="setShadow"><button data-v="1">开</button><button data-v="0">关</button></div>
+        </div>
+        <div class="row"><label>装饰物（藤/叶/花瓣/碎石）</label>
+          <div class="pill" id="setDecor"><button data-v="1">开</button><button data-v="0">关</button></div>
+        </div>
+      </div>
+      <div class="sec">
+        <h3>显示与硬件</h3>
+        <div class="row"><label>设备像素比上限</label>
+          <select id="setDpr"><option value="1">1.0</option><option value="1.5">1.5</option><option value="2">2.0</option></select>
+        </div>
+        <div class="row"><label>锐度</label>
+          <input id="setSharp" type="range" min="0" max="1" step="0.05"><span class="val" id="setSharpVal"></span>
+        </div>
+        <div class="row"><label>超采样</label>
+          <select id="setSS">
+            <option value="1">1.0x（原生）</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x（最清晰，最吃性能）</option>
+          </select>
+        </div>        <div class="row"><label>抗锯齿</label>
+          <select id="setAA">
+            <option value="smaa">SMAA（细节最好）</option>
+            <option value="fxaa">FXAA（最快）</option>
+            <option value="off">关（1.25x 以上超采样可关）</option>
+          </select>
+        </div>
+        <div class="row"><label>雾浓度</label>
+          <input id="setFog" type="range" min="0" max="1" step="0.05"><span class="val" id="setFogVal"></span>
+        </div>
+        <div class="row"><label>视场角 FOV</label>
+          <input id="setFov" type="range" min="45" max="80" step="1"><span class="val" id="setFovVal"></span>
+        </div>
+        <div class="row"><label>显示 FPS</label>
+          <div class="pill" id="setFps"><button data-v="1">显示</button><button data-v="0">隐藏</button></div>
+        </div>
+        <div class="row"><label>显卡 / 垂直同步</label>
+          <div class="pill">
+            <button id="copyGpuCmd">复制独显启动命令</button>
+            <button id="copyVsyncCmd">复制解锁垂直同步命令</button>
+          </div>
+        </div>
+        <div class="row"><label>刷新模式</label><span class="val" id="vsyncState">检测中…</span></div>        <div class="info" id="gpuInfo"></div>
+      </div>
+    </div>
+    <div class="sec" id="nativeSection" style="display:none; padding:14px 24px;">
+      <h3 style="margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em;">原生壳（Electron）· 改动需要重启应用</h3>
+      <div class="row"><label>图形后端</label>
+        <select id="nativeAngle">
+          <option value="vulkan">Vulkan（独显首选）</option>
+          <option value="d3d11">D3D11</option>
+          <option value="default">跟随系统</option>
+        </select>
+      </div>
+      <div class="row"><label>垂直同步</label>
+        <div class="pill" id="nativeVsync"><button data-v="1">开</button><button data-v="0">关（解锁帧率）</button></div>
+      </div>
+      <div class="row"><label>生效方式</label>
+        <div class="pill"><button id="nativeApply" class="on">应用并重启</button></div>
+      </div>
+      <div class="info" id="nativeInfo"></div>
+    </div>    <div class="sec" style="padding:14px 24px;">
+      <h3 style="margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em;">按键（点一下再按新键；Esc 取消）</h3>
+      <div class="keys" id="keyList"></div>
+    </div>
+    <div class="info" id="flagInfo"></div>
+    <div class="foot">
+      <button id="setReset">恢复默认</button>
+      <button class="primary" id="setClose">完成</button>
+    </div>
+  </div>
+</div>
 
 <script type="importmap">
 {

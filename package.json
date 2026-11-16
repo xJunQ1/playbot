@@ -1,18 +1,21 @@
 {
-  "name": "souls-graybox",
-  "private": true,
-  "type": "module",
-  "version": "0.1.0",
-  "description": "2.5D/3D 类魂 Boss 战灰盒 —— 帧数据驱动的战斗原型",
-  "scripts": {
-    "dev": "node serve.mjs"
-  },
-  "dependencies": {
-    "fbx2gltf": "^0.9.7-p1",
-    "lil-gui": "^0.19.2",
-    "three": "^0.169.0"
-  },
-  "devDependencies": {
-    "@gltf-transform/cli": "^4.5.1"
-  }
+    "name": "souls-graybox",
+    "private": true,
+    "type": "module",
+    "version": "0.1.0",
+    "description": "2.5D/3D 类魂 Boss 战灰盒 —— 帧数据驱动的战斗原型",
+    "scripts": {
+        "dev": "node serve.mjs",
+        "app": "electron electron/main.cjs",
+        "app:smoke": "electron electron/main.cjs --smoke"
+    },
+    "dependencies": {
+        "fbx2gltf": "^0.9.7-p1",
+        "lil-gui": "^0.19.2",
+        "three": "^0.187.0"
+    },
+    "devDependencies": {
+        "@gltf-transform/cli": "^4.5.1",
+        "electron": "^33.4.11"
+    }
 }
