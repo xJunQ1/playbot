@@ -358,6 +358,15 @@ function retargetClip(targetRoot, sourceRoot, clip) {
   const out = [];
   const tmp = new THREE.Quaternion();
 
+  // 目标骨骼的局部 rest 只在第一次抓，缓存住。
+  // 否则第一个剪辑把骨架摆好之后，后面每个剪辑都会把「当前姿势」当成 rest，越接越歪。
+  let restMap = targetRoot.userData.__restLocal;
+  if (!restMap) {
+    restMap = new Map();
+    for (const [name, obj] of tMap) restMap.set(obj, obj.quaternion.clone());
+    targetRoot.userData.__restLocal = restMap;
+  }
+
   for (const track of clip.tracks) {
     const dot = track.name.lastIndexOf('.');
     if (dot < 0) continue;
@@ -388,7 +397,7 @@ function retargetClip(targetRoot, sourceRoot, clip) {
     if (prop !== 'quaternion') continue;
 
     const qsInv = s.quaternion.clone().invert();
-    const qt = t.quaternion.clone();
+    const qt = (restMap.get(t) ?? t.quaternion).clone();
     const vals = new Float32Array(track.values.length);
     for (let k = 0; k < track.values.length; k += 4) {
       tmp.fromArray(track.values, k);
@@ -446,8 +455,32 @@ function retargetClipWorld(targetRoot, sourceRoot, clip, name) {
   const qS = new THREE.Quaternion();
   const qP = new THREE.Quaternion();
   const qL = new THREE.Quaternion();
+  const qDelta = new THREE.Quaternion();
+  const qTarget = new THREE.Quaternion();
+  const qT = new THREE.Quaternion();
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
+
+  // 只搬「相对绑定姿势的旋转增量」，不要直接复制世界朝向。
+  // 直接复制会把两边 rest 的差异（Tripo 的 A-pose / 骨架朝向）也算进去，
+  // 人就会整个歪掉。目标的 rest 只抓一次，缓存在 userData 上。
+  sourceRoot.updateMatrixWorld(true);
+  const sRest = new Map();
+  for (const [t, s] of pairs) {
+    s.matrixWorld.decompose(v1, qS, v1);
+    sRest.set(s, qS.clone());
+  }
+
+  let tRest = targetRoot.userData.__restQuat;
+  if (!tRest) {
+    targetRoot.updateMatrixWorld(true);
+    tRest = new Map();
+    for (const [t] of pairs) {
+      t.matrixWorld.decompose(v1, qT, v1);
+      tRest.set(t, qT.clone());
+    }
+    targetRoot.userData.__restQuat = tRest;
+  }
 
   for (let f = 0; f <= frames; f++) {
     times[f] = Math.min(clip.duration, f / fps);
@@ -455,11 +488,17 @@ function retargetClipWorld(targetRoot, sourceRoot, clip, name) {
     sourceRoot.updateMatrixWorld(true);
 
     for (const [t, s] of pairs) {
-      s.matrixWorld.decompose(v1, qS, v1);                 // source 世界朝向
+      s.matrixWorld.decompose(v1, qS, v1);                 // source 当前朝向
+      // R = R_now · R_rest⁻¹：把骨骼从 rest 转到当前姿态的那个「世界旋转」
+      qT.copy(sRest.get(s)).invert();
+      qDelta.copy(qS).multiply(qT).normalize();
+      // 再把它作用到目标的 rest 上：R · R_target_rest
+      qTarget.copy(qDelta).multiply(tRest.get(t)).normalize();
+
       if (t.parent) t.parent.matrixWorld.decompose(v2, qP, v2);
       else qP.identity();
 
-      qL.copy(qP).invert().multiply(qS).normalize();
+      qL.copy(qP).invert().multiply(qTarget).normalize();
       qL.toArray(bufs.get(t.name), f * 4);
 
       // 立刻写回并刷新矩阵，让同一帧里的子骨骼能读到
@@ -612,6 +651,74 @@ export function dampenArmSwing(
   }
   return count;
 }
+/** 找一段动作里「手最快」的时刻（秒）—— 攻击动画的命中点大概就在那 */
+/**
+ * 去掉骨骼的 translation / scale 轨道，只保留 rotation。
+ * 位移只留 Root / Hip 这种真正需要位移的根骨 —— 其余骨骼的位移是
+ * 源骨架的骨头长度，套到别的骨架上会直接把手脚拉长。
+ */
+function stripBoneTransforms(clip) {
+  const tracks = clip.tracks.filter((t) => {
+    if (t.name.endsWith('.scale')) return false;
+    if (t.name.endsWith('.position')) {
+      const bone = t.name.slice(0, -'.position'.length);
+      return /^(root|hip|hips|pelvis)$/i.test(bone);
+    }
+    return true;
+  });
+  const out = new THREE.AnimationClip(clip.name, clip.duration, tracks);
+  return out;
+}
+function findStrikeTime(clip) {
+  const re = /(R_Upperarm|R_Forearm|R_Hand|R_Clavicle)\.quaternion$/i;
+  let best = -1;
+  let bestT = clip.duration * 0.4;
+  for (const tr of clip.tracks) {
+    if (!re.test(tr.name)) continue;
+    const n = tr.values.length / 4;
+    for (let i = 1; i < n; i++) {
+      const b = (i - 1) * 4, a = i * 4;
+      let dot = Math.abs(
+        tr.values[a] * tr.values[b] + tr.values[a + 1] * tr.values[b + 1] +
+        tr.values[a + 2] * tr.values[b + 2] + tr.values[a + 3] * tr.values[b + 3]
+      );
+      dot = Math.min(1, dot);
+      const ang = 2 * Math.acos(dot);
+      if (ang > best) { best = ang; bestT = tr.times[i]; }
+    }
+  }
+  return bestT;
+}
+
+/**
+ * 加载「同一个骨架」的自带动作包：不做重定向，只按名字登记。
+ * 攻击类走 autoSlice —— 把长动画切到命中点前后，避免被帧表压成 4 倍速。
+ */
+export async function loadClipPack(binder, url, opts = {}) {
+  if (!binder || !binder.loader) return 0;
+  const g = await binder.loader.loadAsync(url);
+  const byName = new Map((g.animations ?? []).map((c) => [c.name, c]));
+  const auto = new Set(opts.autoSlice ?? []);
+  let n = 0;
+
+  for (const [target, srcName] of Object.entries(opts.map ?? {})) {
+    const clip = byName.get(srcName);
+    if (!clip) continue;
+    // 动作文件里每根骨骼都带 translation/scale 轨道。它俩是「源骨架的骨头长度」，
+    // 套到另一副骨架上会把手臂拉长、关节错位。只保留旋转，位移只留根骨和胯。
+    let c = stripBoneTransforms(clip);
+    if (auto.has(target)) {
+      const t = findStrikeTime(clip);
+      const a = Math.max(0, t - 0.32);
+      const b = Math.min(clip.duration, t + 0.52);
+      if (b - a > 0.2) c = sliceClip(clip, a * 60, b * 60, 60);
+    }
+    c.name = target;
+    binder.clips.set(target, c);
+    n++;
+  }
+  return n;
+}
 export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
   if (!binder || !binder.loader) return 0;
   const entries = Object.entries(pack);
@@ -627,13 +734,10 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
       //    （RightUpLeg 差 180°、Shoulder 差 132°）。用局部公式：
       //        target = targetRest · (sourceRest⁻¹ · anim)
       //    世界空间版本（retargetClipWorld）在这两套 rig 上反而更差，不启用。
-      // 目标骨架是 Mixamo 命名 → 用局部公式（快，且已在这套 rig 上调过）
-      // 否则（Tripo 这类改过名的骨架）→ 世界空间重定向，父链差异自动吸收
-      if (usesMixamoRig(binder.root)) {
-        clip = retargetClip(binder.root, g.scene, clip);
-      } else {
-        clip = retargetClipWorld(binder.root, g.scene, clip, clip.name) ?? retargetClip(binder.root, g.scene, clip);
-      }
+      // 统一用「局部增量」重定向：target = rest · (sourceRest⁻¹ · anim)。
+      // 它对两侧 rest 的轴向差异不敏感；世界空间版本会把 Mixamo 绑定姿势里
+      // 的 -90° 轴修正当成动作，导致整个人往前倒。
+      clip = retargetClip(binder.root, g.scene, clip);
 
       // ② 砍掉后半段回位：动捕会把动作慢慢收回静止姿势，游戏里只要「挥完就停」
       const info = STRIKE[name];

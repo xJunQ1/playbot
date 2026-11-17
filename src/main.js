@@ -140,9 +140,9 @@ composer.addPass(sharpen);
 // ── 画质档位：低 / 中 / 高，Q 键循环
 //  只动「渲染分辨率 / 环境光遮蔽 / 装饰物件」，不改光照数量（改灯会触发着色器重编译）
 const QUALITY = {
-  low:  { res: 0.7,  ao: false, decor: false, label: '低' },
-  mid:  { res: 1.0,  ao: false, decor: true,  label: '中' },
-  high: { res: 1.0,  ao: true,  decor: true,  label: '高' },
+  low: { res: 0.7, ao: false, decor: false, label: '低' },
+  mid: { res: 1.0, ao: false, decor: true, label: '中' },
+  high: { res: 1.0, ao: true, decor: true, label: '高' },
 };
 let qualityName = QS.get('q') || 'high';
 let qualityRes = 1.0;
@@ -798,7 +798,7 @@ function pickBossMove(dist) {
     if (dist < m.minRange || dist > m.maxRange) continue;
     if (AI.recent.includes(id)) continue;
     const cdScale = CFG.bossCooldownScale * (AI.phase2 ? 0.72 : 1);
-      const ready = (logicFrame - (AI.cooldowns?.[id] ?? -999)) > m.cooldown * 60 * cdScale;
+    const ready = (logicFrame - (AI.cooldowns?.[id] ?? -999)) > m.cooldown * 60 * cdScale;
     if (!ready) continue;
     // 距离越接近区间中心权重越高
     const mid = (m.minRange + m.maxRange) / 2;
@@ -1265,12 +1265,28 @@ function setupDragWeapon() {
   num('delev', 'elev');
   num('droll', 'roll');
 
+  // 用「模型实际身高」当拖刀尺度的基准（boss.hurt.height 是战斗数值，和模型不一定一致）
+  let modelH = 1.9;
+  try {
+    const ws = new THREE.Vector3();
+    boss.binder.root.getWorldScale(ws);
+    let localH = 0;
+    boss.binder.root.traverse((o) => {
+      if (!o.isSkinnedMesh || !o.geometry) return;
+      o.geometry.computeBoundingBox();
+      const h = o.geometry.boundingBox.max.y - o.geometry.boundingBox.min.y;
+      if (h > localH) localH = h;
+    });
+    if (localH > 1e-3) modelH = localH * ws.y;
+  } catch (e) { /* 灰盒模式下没有 binder，用默认值 */ }
+
   dragState = {
     obj: w,
     hand: w.parent,
     pos: w.position.clone(),
     quat: w.quaternion.clone(),
     scale: w.scale.clone(),
+    heightRef: modelH,
     onHand: true,
   };
 }
@@ -1312,7 +1328,7 @@ function updateDragWeapon() {
   d.hand.updateWorldMatrix(true, false);
   _dragHandPos.setFromMatrixPosition(d.hand.matrixWorld);
   // 高度和刀刃落点按 Boss 身高算：换模型 / 改体型都不用重调
-  const H = boss.hurt?.height ?? 1.9;
+  const H = d.heightRef || 1.9;
   const gripY = DRAG.height > 0 ? DRAG.height : H * 0.48;
   d.obj.position.set(
     _dragHandPos.x - fx * DRAG.back,
@@ -1322,7 +1338,7 @@ function updateDragWeapon() {
   d.obj.quaternion.copy(_dragQuat);
 
   // 刀刃落点贴地 → 在地面留一道划痕（只在拖刀状态产生）
-  const tipLen = DRAG.tipLen > 0 ? DRAG.tipLen : (boss.hurt?.height ?? 1.9) * 1.02;
+  const tipLen = DRAG.tipLen > 0 ? DRAG.tipLen : (d.heightRef || 1.9) * 1.02;
   scratch.emit(
     d.obj.position.x + _dragDir.x * tipLen,
     d.obj.position.z + _dragDir.z * tipLen,
@@ -1688,7 +1704,7 @@ function resetFight() {
   if (!pUrl && !bUrl) return;
 
   try {
-    const { bindModel, loadAnimationPack, dampenArmSwing } = await import('./asset-adapter.js');
+    const { bindModel, loadAnimationPack, loadClipPack, dampenArmSwing } = await import('./asset-adapter.js');
     banner('加载模型…', 1500);
     await Promise.all([
       pUrl ? bindModel(player, pUrl, {
@@ -1707,15 +1723,16 @@ function resetFight() {
         } : undefined,
         weapon: (!weaponUrl && wantWeapon) ? { length: Number(q.get('wl') ?? 1.4) } : null,
         scale: Number(q.get('ps') ?? 1),
-        yawOffset: Number(q.get('py') ?? 0),
+        // Tripo 模型自身朝 +X，游戏约定是 +Z：补 -90°
+        yawOffset: Number(q.get('py') ?? -Math.PI / 2),
       }) : null,
       bUrl ? bindModel(boss, bUrl, {
         renderer,
-        targetHeight: Number(q.get('bh') ?? 4.60),
+        targetHeight: Number(q.get('bh') ?? 1.95),
         // Boss 的镰刀：等比缩放（默认开），长轴本来就是 Y，不需要转轴
         weaponModel: bossWeaponUrl,
         weaponOpts: bossWeaponUrl ? {
-          length: Number(q.get('bwl') ?? 4.80),
+          length: Number(q.get('bwl') ?? 2.10),
           alignAxis: q.get('bwax') ?? 'y',
           gripEnd: Number(q.get('bwgrip') ?? -1),
           gripShift: Number(q.get('bwshift') ?? 0.10),
@@ -1728,7 +1745,8 @@ function resetFight() {
         } : undefined,
         weapon: (!bossWeaponUrl && wantWeapon) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
         scale: Number(q.get('bs') ?? 1),
-        yawOffset: Number(q.get('by') ?? 0),
+        // 同上：模型正面是 +X，不补这 -90° 就会横着走
+        yawOffset: Number(q.get('by') ?? -Math.PI / 2),
       }) : null,
     ].filter(Boolean));
 
@@ -1751,6 +1769,46 @@ function resetFight() {
       banner('加载动作包…', 1200);
       const actors = [player, boss].filter((a) => a.binder);
       const counts = await Promise.all(actors.map((a) => loadAnimationPack(a.binder)));
+
+      // Boss 用自带动作包（assets/boss_anims.glb，同一套 Tripo 骨架，直接播）
+      let bossPicked = 0;
+      if (boss.binder) {
+        try {
+          bossPicked = await loadClipPack(boss.binder, 'assets/boss_anims.glb', {
+            map: {
+              cry: 'cry',
+              walk: 'walk',
+              slash: 'slash',
+              chop: 'chop',
+              cast: 'cast_a_spell',
+              hit: 'hit_to_body_01',
+              dead: 'defeat_03',
+            },
+            autoSlice: ['slash', 'chop'],
+          });
+        } catch (e) {
+          console.warn('[boss-anim] 自带动作包加载失败，回退 Mixamo:', e);
+        }
+
+        if (bossPicked > 0) {
+          Object.assign(boss.binder.clipMap, {
+            idle: 'cry',
+            walk: 'walk',
+            move: 'walk',
+            moveback: 'walk',
+            blockmove: 'walk',
+            block: 'walk',
+            b_sweep: 'slash',
+            b_slam: 'chop',
+            b_charge: 'slash',
+            b_roar: 'cast',
+            hitstun: 'hit',
+            guardbreak: 'hit',
+            dead: 'dead',
+          });
+          console.log('[boss-anim] 自带动作包已接管 Boss，clip 数:', bossPicked);
+        }
+      }
 
       // Boss 走路摆臂太大：只保留 25% 摆幅（?barm=0 锁死手臂，?barm=1 复原）
       // 只处理移动类剪辑，攻击/翻滚/受击的甩臂原样保留。
