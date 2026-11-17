@@ -446,7 +446,7 @@ export class MeleeVFX {
     }
     const root = actor?.binder?.root;
     if (root) {
-      const hand = this._findBone(root, /righthand|right_hand|hand_r|handr/i);
+      const hand = this._findBone(root, /right.?hand|R_Hand|hand_r|handr/i);
       if (hand) return { obj: hand, offset: new THREE.Vector3() };
     }
     return null;

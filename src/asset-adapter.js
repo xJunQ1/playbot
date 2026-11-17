@@ -106,15 +106,51 @@ export class ModelBinder {
    */
   fitToHeight(targetHeight) {
     this.root.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(this.root);
-    const h = box.max.y - box.min.y;
-    if (h < 1e-4) return;
 
-    this.root.scale.multiplyScalar(targetHeight / h);
+    // 蒙皮网格不能用 Box3.setFromObject 量身高：它会把骨骼变换算进去，
+    // 姿态一变包围盒就失真（Tripo 的 Boss 因此只被放大到 1.8 倍，比玩家还矮）。
+    // 改成直接读几何体的局部包围盒，再乘上网格相对 root 的缩放。
+    let localH = 0;
+    let meshRel = 1;
+    const ws = new THREE.Vector3();
+    this.root.getWorldScale(ws);
+    this.root.traverse((o) => {
+      if (!o.isSkinnedMesh || !o.geometry) return;
+      o.geometry.computeBoundingBox();
+      const h = o.geometry.boundingBox.max.y - o.geometry.boundingBox.min.y;
+      if (h <= localH) return;
+      localH = h;
+      const ms = new THREE.Vector3();
+      o.getWorldScale(ms);
+      meshRel = ws.y > 1e-6 ? ms.y / ws.y : 1;
+    });
+
+    let worldH = localH * meshRel;
+    if (worldH < 1e-4) {
+      const box = new THREE.Box3().setFromObject(this.root);
+      worldH = box.max.y - box.min.y;
+    }
+    if (worldH < 1e-4) return;
+
+    this.root.scale.multiplyScalar(targetHeight / (worldH * this.root.scale.y));
 
     this.root.updateMatrixWorld(true);
-    const box2 = new THREE.Box3().setFromObject(this.root);
-    this.root.position.y -= box2.min.y;   // 脚底贴地
+
+    // 脚底贴地：自己算几何包围盒的世界最低点（Box3 对 SkinnedMesh 会失真，
+    // 之前 Boss 放大到 4.6m 后整只脚浮在地面上 0.5m）
+    let minY = Infinity;
+    const v = new THREE.Vector3();
+    this.root.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      o.geometry.computeBoundingBox();
+      const b = o.geometry.boundingBox;
+      for (let i = 0; i < 8; i++) {
+        v.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z);
+        v.applyMatrix4(o.matrixWorld);
+        if (v.y < minY) minY = v.y;
+      }
+    });
+    if (Number.isFinite(minY)) this.root.position.y -= minY;
   }
 
   _getAction(name) {
@@ -251,6 +287,68 @@ export const SOULS_PACK = {
  * 只补偿 rotation。position 一律丢弃 —— 两套骨架的长度不同，做差值补偿会把
  * 骨骼拉长/压短，表现就是「蹲成一团」。位移交回 frame-data.js 的 motion 曲线。
  */
+// ── 骨架别名 ──────────────────────────────────────────────────
+// Mixamo 动作包的轨道名是 mixamorigHips / LeftArm…，而 Tripo、Mixamo 之外
+// 的通用人形骨架常叫 Hip / L_Upperarm / R_Hand。retarget 时按这张表找目标骨骼。
+const BONE_ALIASES = {
+  Hips: ['Hip', 'Pelvis'],
+  Spine: ['Spine01', 'Spine'],
+  Spine1: ['Spine02', 'Spine1'],
+  Spine2: null,                       // 目标只有两节脊椎，跳过避免双写同一条骨
+  Neck: ['NeckTwist01', 'Neck'],
+  Head: ['Head'],
+  LeftShoulder: ['L_Clavicle'],
+  LeftArm: ['L_Upperarm'],
+  LeftForeArm: ['L_Forearm'],
+  LeftHand: ['L_Hand'],
+  RightShoulder: ['R_Clavicle'],
+  RightArm: ['R_Upperarm'],
+  RightForeArm: ['R_Forearm'],
+  RightHand: ['R_Hand'],
+  LeftUpLeg: ['L_Thigh'],
+  LeftLeg: ['L_Calf'],
+  LeftFoot: ['L_Foot'],
+  LeftToeBase: ['L_ToeBase'],
+  RightUpLeg: ['R_Thigh'],
+  RightLeg: ['R_Calf'],
+  RightFoot: ['R_Foot'],
+  RightToeBase: ['R_ToeBase'],
+};
+
+/** 去掉 mixamorig / mixamorig: 前缀，拿到纯骨骼名 */
+function stripRigName(name) {
+  return name.replace(/^mixamorig[:_]?/i, '');
+}
+
+/** 在目标骨架里找这条轨道对应的骨骼：原名 → 去前缀 → 别名表 */
+function resolveTargetBone(tMap, name) {
+  if (tMap.has(name)) return tMap.get(name);
+  const base = stripRigName(name);
+  if (tMap.has(base)) return tMap.get(base);
+  const alts = BONE_ALIASES[base];
+  if (alts) for (const a of alts) if (tMap.has(a)) return tMap.get(a);
+  return null;
+}
+
+/** 找右手骨骼：兼容 Mixamo（RightHand）与 Tripo（R_Hand） */
+function findHand(root) {
+  return findBone(root, /(right.?hand|R_Hand)$/i) ?? findBone(root, /hand_r$/i);
+}
+/** 目标骨架是不是 Mixamo 命名（决定用局部公式还是世界空间重定向） */
+function usesMixamoRig(root) {
+  let hit = false;
+  root.traverse((o) => { if (!hit && o.isBone && /mixamorig/i.test(o.name ?? "")) hit = true; });
+  return hit;
+}
+
+function lookupSourceByAlias(targetName, sByBase) {
+  for (const [base, alts] of Object.entries(BONE_ALIASES)) {
+    if (!alts) continue;
+    if (alts.includes(targetName)) return sByBase.get(base) ?? null;
+  }
+  return null;
+}
+
 function retargetClip(targetRoot, sourceRoot, clip) {
   const tMap = new Map();
   const sMap = new Map();
@@ -266,7 +364,7 @@ function retargetClip(targetRoot, sourceRoot, clip) {
     const bone = track.name.slice(0, dot);
     const prop = track.name.slice(dot + 1);
 
-    const t = tMap.get(bone);
+    const t = resolveTargetBone(tMap, bone);
     const s = sMap.get(bone);
     if (!t || !s) continue;
 
@@ -274,7 +372,7 @@ function retargetClip(targetRoot, sourceRoot, clip) {
       // 只保留 Hips 的位移。翻滚时身体下潜靠的就是它 —— 全删掉只剩骨骼旋转，
       // 头顶永远降不下去，看起来像「按了闪避但人没滚」。
       // X/Z 锁死在 rest，避免和 frame-data.js 的 motion 曲线叠成双倍位移。
-      if (!/Hips$/i.test(bone)) continue;
+      if (!/^hips?$/i.test(stripRigName(bone))) continue;
       const ps = s.position;
       const pt = t.position;
       const vals = new Float32Array(track.values.length);
@@ -283,7 +381,7 @@ function retargetClip(targetRoot, sourceRoot, clip) {
         vals[k + 1] = pt.y + (track.values[k + 1] - ps.y);
         vals[k + 2] = pt.z;
       }
-      out.push(new THREE.VectorKeyframeTrack(`${bone}.position`, track.times, vals));
+      out.push(new THREE.VectorKeyframeTrack(`${t.name}.position`, track.times, vals));
       continue;
     }
 
@@ -299,7 +397,7 @@ function retargetClip(targetRoot, sourceRoot, clip) {
       tmp.normalize();
       tmp.toArray(vals, k);
     }
-    out.push(new THREE.QuaternionKeyframeTrack(`${bone}.quaternion`, track.times, vals));
+    out.push(new THREE.QuaternionKeyframeTrack(`${t.name}.quaternion`, track.times, vals));
   }
 
   return new THREE.AnimationClip(clip.name, clip.duration, out);
@@ -325,15 +423,22 @@ function retargetClipWorld(targetRoot, sourceRoot, clip, name) {
   sourceRoot.traverse((o) => { if (o.name) sMap.set(o.name, o); });
 
   // 前序遍历：父骨骼一定排在子骨骼前面，算一帧时能直接用父的矩阵
-  const ordered = [];
-  targetRoot.traverse((o) => { if (o.name && sMap.has(o.name)) ordered.push(o.name); });
-  if (ordered.length < 10) return null;
+  // 目标骨骼 ↔ 源骨骼配对：同名 → 去前缀同名 → 别名表反查
+  const sByBase = new Map();
+  for (const [name, obj] of sMap) sByBase.set(stripRigName(name), obj);
+  const pairs = [];
+  targetRoot.traverse((o) => {
+    if (!o.isBone || !o.name) return;
+    const s = sMap.get(o.name) ?? sByBase.get(o.name) ?? lookupSourceByAlias(o.name, sByBase);
+    if (s) pairs.push([o, s]);
+  });
+  if (pairs.length < 10) return null;
 
   const fps = 60;
   const frames = Math.ceil(clip.duration * fps);
   const times = new Float32Array(frames + 1);
   const bufs = new Map();
-  for (const n of ordered) bufs.set(n, new Float32Array((frames + 1) * 4));
+  for (const [t] of pairs) bufs.set(t.name, new Float32Array((frames + 1) * 4));
 
   const mixer = new THREE.AnimationMixer(sourceRoot);
   mixer.clipAction(clip).play();
@@ -349,16 +454,13 @@ function retargetClipWorld(targetRoot, sourceRoot, clip, name) {
     mixer.setTime(times[f]);
     sourceRoot.updateMatrixWorld(true);
 
-    for (const n of ordered) {
-      const s = sMap.get(n);
-      const t = tMap.get(n);
-
+    for (const [t, s] of pairs) {
       s.matrixWorld.decompose(v1, qS, v1);                 // source 世界朝向
       if (t.parent) t.parent.matrixWorld.decompose(v2, qP, v2);
       else qP.identity();
 
       qL.copy(qP).invert().multiply(qS).normalize();
-      qL.toArray(bufs.get(n), f * 4);
+      qL.toArray(bufs.get(t.name), f * 4);
 
       // 立刻写回并刷新矩阵，让同一帧里的子骨骼能读到
       t.quaternion.copy(qL);
@@ -371,8 +473,8 @@ function retargetClipWorld(targetRoot, sourceRoot, clip, name) {
   mixer.stopAllAction();
   mixer.uncacheRoot(sourceRoot);
 
-  const tracks = ordered.map(
-    (n) => new THREE.QuaternionKeyframeTrack(`${n}.quaternion`, times, bufs.get(n))
+  const tracks = pairs.map(
+    ([t]) => new THREE.QuaternionKeyframeTrack(`${t.name}.quaternion`, times, bufs.get(t.name))
   );
   return new THREE.AnimationClip(name, clip.duration, tracks);
 }
@@ -476,7 +578,7 @@ export function dampenArmSwing(
   clips,
   names,
   factor = 0.25,
-  boneRe = /(LeftArm|RightArm|LeftForeArm|RightForeArm|LeftShoulder|RightShoulder)$/i,
+  boneRe = /(LeftArm|RightArm|LeftForeArm|RightForeArm|LeftShoulder|RightShoulder|L_Upperarm|R_Upperarm|L_Forearm|R_Forearm|L_Clavicle|R_Clavicle)$/i,
 ) {
   if (!(factor >= 0 && factor < 1)) return 0;
 
@@ -525,7 +627,13 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
       //    （RightUpLeg 差 180°、Shoulder 差 132°）。用局部公式：
       //        target = targetRest · (sourceRest⁻¹ · anim)
       //    世界空间版本（retargetClipWorld）在这两套 rig 上反而更差，不启用。
-      clip = retargetClip(binder.root, g.scene, clip);
+      // 目标骨架是 Mixamo 命名 → 用局部公式（快，且已在这套 rig 上调过）
+      // 否则（Tripo 这类改过名的骨架）→ 世界空间重定向，父链差异自动吸收
+      if (usesMixamoRig(binder.root)) {
+        clip = retargetClip(binder.root, g.scene, clip);
+      } else {
+        clip = retargetClipWorld(binder.root, g.scene, clip, clip.name) ?? retargetClip(binder.root, g.scene, clip);
+      }
 
       // ② 砍掉后半段回位：动捕会把动作慢慢收回静止姿势，游戏里只要「挥完就停」
       const info = STRIKE[name];
@@ -595,7 +703,7 @@ function findBone(root, re) {
  * 武器会跟着等比放大，不用为玩家和 Boss 各配一套数值。
  */
 export function attachWeapon(root, opts = {}) {
-  const hand = findBone(root, /righthand/i);
+  const hand = findHand(root);
   if (!hand) return null;
 
   // length 用「世界米数」传，这里换算回骨骼空间。
@@ -654,7 +762,7 @@ export function attachWeapon(root, opts = {}) {
  * jian.glb 这种 AI 生成模型长轴常常是 Z 而不是 Y，不转的话剑会横着戳出去。
  */
 export async function attachWeaponModel(binder, url, opts = {}) {
-  const hand = findBone(binder.root, /righthand/i);
+  const hand = findHand(binder.root);
   if (!hand) return null;
 
   const g = await binder.loader.loadAsync(url);

@@ -1236,7 +1236,8 @@ function updateGuardViz(a) {
 const DRAG = {
   enabled: true,
   back: 0.02,     // 握把相对右手再往后挪多少（米）
-  height: 0.92,   // 握把离地高度（固定，不随走路起伏）
+  height: 0,      // 握把离地高度；0 = 按 Boss 身高自动（0.48H）
+  tipLen: 0,      // 刀刃落点距离；0 = 按身高自动（1.02H）
   elev: 0.45,     // 刀杆俯角（弧度）：刀尖正好落在地面
   roll: 0,        // 绕刀杆自转：调刀刃朝上 / 朝地
 };
@@ -1260,6 +1261,7 @@ function setupDragWeapon() {
   };
   num('dback', 'back');
   num('dh', 'height');
+  num('dtip', 'tipLen');
   num('delev', 'elev');
   num('droll', 'roll');
 
@@ -1309,15 +1311,18 @@ function updateDragWeapon() {
   // 握把钉在右手正下方：只跟手的水平位置，高度写死 —— 所以不会上下颠
   d.hand.updateWorldMatrix(true, false);
   _dragHandPos.setFromMatrixPosition(d.hand.matrixWorld);
+  // 高度和刀刃落点按 Boss 身高算：换模型 / 改体型都不用重调
+  const H = boss.hurt?.height ?? 1.9;
+  const gripY = DRAG.height > 0 ? DRAG.height : H * 0.48;
   d.obj.position.set(
     _dragHandPos.x - fx * DRAG.back,
-    DRAG.height,
+    gripY,
     _dragHandPos.z - fz * DRAG.back,
   );
   d.obj.quaternion.copy(_dragQuat);
 
   // 刀刃落点贴地 → 在地面留一道划痕（只在拖刀状态产生）
-  const tipLen = 2.05;
+  const tipLen = DRAG.tipLen > 0 ? DRAG.tipLen : (boss.hurt?.height ?? 1.9) * 1.02;
   scratch.emit(
     d.obj.position.x + _dragDir.x * tipLen,
     d.obj.position.z + _dragDir.z * tipLen,
@@ -1673,8 +1678,8 @@ function resetFight() {
   // 默认就加载完整美术资源：模型 + 武器 + 动捕包。
   // 想回到纯灰盒（零依赖、秒开）加 ?graybox=1。
   const graybox = q.get('graybox') != null;
-  const pUrl = graybox ? null : (q.get('p') ?? 'assets/Y_Bot.glb');
-  const bUrl = graybox ? null : (q.get('b') ?? 'assets/Y_Bot.glb');
+  const pUrl = graybox ? null : (q.get('p') ?? 'assets/user3.glb');
+  const bUrl = graybox ? null : (q.get('b') ?? 'assets/boss3.glb');
   const wantWeapon = !graybox && q.get('noweapon') == null;
   const weaponUrl = wantWeapon ? (q.get('wp') ?? 'assets/jian_min.glb') : null;
   // Boss 单独一把武器：默认换镰刀，?bwp=... 可覆盖，?bwp=none 回到同一把剑
@@ -1710,7 +1715,7 @@ function resetFight() {
         // Boss 的镰刀：等比缩放（默认开），长轴本来就是 Y，不需要转轴
         weaponModel: bossWeaponUrl,
         weaponOpts: bossWeaponUrl ? {
-          length: Number(q.get('bwl') ?? 2.10),
+          length: Number(q.get('bwl') ?? 4.80),
           alignAxis: q.get('bwax') ?? 'y',
           gripEnd: Number(q.get('bwgrip') ?? -1),
           gripShift: Number(q.get('bwshift') ?? 0.10),
