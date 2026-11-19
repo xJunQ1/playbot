@@ -7,15 +7,15 @@ const KEY = 'souls-demo-settings';
 const DEFAULTS = {
   preset: 'high',
   res: 1,
-  ao: 'mid',      // off | low(8) | mid(16) | high(24)
+  ao: 'high',     // off | low(8) | mid(16) | high(24)
   shadow: true,
   decor: true,
   dpr: 2,
-  fov: 58,
+  fov: 35,
   fps: true,
   sharp: 0.35,
-  ss: 1.0,
-  aa: 'fxaa',
+  ss: 1.5,
+  aa: 'smaa',
   fog: 0.42,
   bloom: 0.22,
 };
@@ -23,14 +23,29 @@ const DEFAULTS = {
 const PRESETS = {
   low:  { res: 0.7, ao: 'off', decor: false },
   mid:  { res: 1.0, ao: 'off', decor: true },
-  high: { res: 1.0, ao: 'mid', decor: true },
+  high: { res: 1.0, ao: 'high', decor: true },
 };
 
 export function createSettings(ctx) {
   const { renderer, composer, gtao, camera, scene, STAGE, CFG, gpuName, keymap, defaultKeys, onKeymapChange, onPreset, sharpen, syncSharpen, bloom, smaa, fxaa } = ctx;
 
+  // 设置表结构版本：v2 = 超采样 1.5x / AO 高 / SMAA；v3 = FOV 默认 35。
+  // 老存档（没有 v 字段）里这几个键会丢掉，让新版默认值生效，其它个人项（体积、键位等）保留。
+  const SCHEMA = 3;
+  const RESET_ON_MIGRATE = ['ss', 'ao', 'aa', 'fov'];
+
   let state = Object.assign({}, DEFAULTS, (() => {
-    try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; }
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (!raw || typeof raw !== 'object') return {};
+      if (Number(raw.v || 1) >= SCHEMA) return raw;
+      const rest = { ...raw };
+      for (const k of RESET_ON_MIGRATE) delete rest[k];
+      delete rest.v;
+      console.log('[settings] 旧存档迁移：超采样/AO/抗锯齿/FOV 回落到新版默认值');
+      console.log('[settings] 当前默认：超采样 1.5x / AO 高 / SMAA / FOV 35');
+      return rest;
+    } catch { return {}; }
   })());
   // URL 覆盖（方便 A/B 截图）：?sharp=0.6&ss=1.5&res=1.25
   (function applyUrlOverrides() {
@@ -45,9 +60,13 @@ export function createSettings(ctx) {
   let pausedBefore = false;
 
   const $ = (id) => document.getElementById(id);
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* 隐私模式 */ } };
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify({ ...state, v: SCHEMA })); } catch { /* 隐私模式 */ } };
+
+  // FOV 允许范围 30~80（30 是滑条下限，长焦视角；上限 80 是广角）
+  const clampFov = (v) => Math.min(80, Math.max(30, Number.isFinite(+v) ? +v : 45));
 
   function apply() {
+    state.fov = clampFov(state.fov);
     const ss = Math.min(1.5, Math.max(1.0, state.ss || 1));
     renderer.setPixelRatio(Math.min(devicePixelRatio, state.dpr) * state.res * ss);
     if (sharpen) {
@@ -106,6 +125,8 @@ export function createSettings(ctx) {
     });
     const res = $('setRes');
     if (res) { res.value = state.res; const v = $('setResVal'); if (v) v.textContent = state.res.toFixed(2) + 'x'; }
+    const ssSel = $('setSS');
+    if (ssSel) ssSel.value = String(state.ss);
     const ao = $('setAO'); if (ao) ao.value = state.ao;
     const sh = $('setShadow');
     if (sh) sh.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === '1') === state.shadow));
@@ -337,6 +358,12 @@ export function createSettings(ctx) {
 
     const res = $('setRes');
     if (res) res.addEventListener('input', (e) => { state.res = parseFloat(e.target.value); state.preset = 'custom'; apply(); });
+    const ssSel2 = $('setSS');
+    if (ssSel2) ssSel2.addEventListener('change', (e) => {
+      state.ss = Math.min(1.5, Math.max(1, parseFloat(e.target.value) || 1));
+      state.preset = 'custom';
+      apply();
+    });
     const ao = $('setAO');
     if (ao) ao.addEventListener('change', (e) => { state.ao = e.target.value; apply(); });
     document.querySelectorAll('#setShadow button').forEach((b) => b.addEventListener('click', () => { state.shadow = b.dataset.v === '1'; apply(); }));

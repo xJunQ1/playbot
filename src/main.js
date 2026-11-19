@@ -18,6 +18,141 @@ import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 import { GroundScratch } from './vfx/scratch.js';
 
 // ═══════════════════════════════════════════════════════════════
+//  0.0 调参持久化（帧数据 / 全局 CFG / 特效）
+//  · 服务端：GET/POST /api/tuning → data/tuning.json（serve.mjs 提供）
+//  · 本地兜底：localStorage，服务端不可用也不会丢
+//  · 调完自动保存（1s 内检测到变化就写盘），重启浏览器/Electron 后自动回填
+// ═══════════════════════════════════════════════════════════════
+const TUNING_KEY = 'souls-tuning-v1';
+// 招式表的「代码版本指纹」：只要 frame-data.js 里的招式数值改过，旧存档里的招式数值就自动作废，
+// 避免"改了代码但存档把旧数字盖回去"这种坑
+// 特效参数也做同样的指纹校验：代码里改了默认值，旧存档里的 vfx 就不再覆盖
+const VFX_REV = (() => {
+  let h = 2166136261;
+  const s = JSON.stringify(VFX_CFG);
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16);
+})();
+
+const MOVES_REV = (() => {
+  let h = 2166136261;
+  const s = JSON.stringify(MOVES);
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16);
+})();
+const MOVE_FIELDS = ['startup', 'active', 'recovery', 'cancelFrom', 'damage', 'poise', 'hitstun', 'stamina'];
+// 这些是「运行时开关」而不是调参：绝对不能存档，否则暂停/调试状态会被固化，
+// 下次启动就是全场景静止 + 输入没反应的假死状态
+const TUNING_SKIP = new Set(['paused', 'showHitbox', 'timeScale']);
+
+function tuningSnapshot() {
+  const moves = {};
+  for (const [id, m] of Object.entries(MOVES)) {
+    const o = {};
+    for (const k of MOVE_FIELDS) if (typeof m[k] === 'number') o[k] = m[k];
+    moves[id] = o;
+  }
+  const pick = (src) => {
+    const o = {};
+    for (const [k, v] of Object.entries(src || {})) {
+      if (TUNING_SKIP.has(k)) continue;
+      if (typeof v === 'number' || typeof v === 'boolean') o[k] = v;
+    }
+    return o;
+  };
+  return { v: 1, rev: MOVES_REV, vfxRev: VFX_REV, moves, cfg: pick(CFG), vfx: pick(VFX_CFG) };
+}
+
+function tuningApply(data) {
+  if (!data || typeof data !== 'object') return false;
+  let hit = 0;
+  for (const [id, o] of Object.entries(data.moves || {})) {
+    const m = MOVES[id];
+    if (!m || !o) continue;
+    for (const k of MOVE_FIELDS) if (typeof o[k] === 'number') { m[k] = o[k]; hit++; }
+  }
+  for (const [k, v] of Object.entries(data.cfg || {})) {
+    if (TUNING_SKIP.has(k)) continue;
+    if (k in CFG && (typeof v === 'number' || typeof v === 'boolean')) { CFG[k] = v; hit++; }
+  }
+  for (const [k, v] of Object.entries(data.vfx || {})) {
+    if (k in VFX_CFG && (typeof v === 'number' || typeof v === 'boolean')) { VFX_CFG[k] = v; hit++; }
+  }
+  return hit > 0;
+}
+
+async function tuningLoad() {
+  let data = null;
+  try {
+    const r = await fetch('/api/tuning', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && Object.keys(j).length) data = j;
+    }
+  } catch { /* 服务端没起来就用本地存档 */ }
+  if (!data) {
+    try { data = JSON.parse(localStorage.getItem(TUNING_KEY) || 'null'); } catch { data = null; }
+  }
+  // 没有 rev 字段的老存档（或 rev 对不上）= 招式数值不可信，整块丢弃
+  const revOk = !data || !data.moves || data.rev === MOVES_REV;
+  if (!revOk) {
+    console.warn(`[tuning] 招式表代码已更新（rev ${data.rev} → ${MOVES_REV}），旧存档的招式数值作废，改用代码里的数字`);
+  }
+  const overrides = [];
+  for (const [id, o] of Object.entries((revOk ? (data && data.moves) : null) || {})) {
+    const m = MOVES[id];
+    if (!m || !o) continue;
+    for (const k of MOVE_FIELDS) {
+      if (TUNING_SKIP.has(k)) continue;
+      if (typeof o[k] === 'number' && o[k] !== m[k]) overrides.push(`${id}.${k}: ${m[k]} → ${o[k]}`);
+    }
+  }
+  const vfxRevOk = !data || !data.vfx || !data.vfxRev || data.vfxRev === VFX_REV;
+  if (!vfxRevOk) console.warn(`[tuning] 特效代码已更新（存档 vfxRev ${data.vfxRev ?? '无'} → 代码 ${VFX_REV}），旧存档的特效参数作废`);
+  const ok = tuningApply(revOk ? (vfxRevOk ? data : { ...data, vfx: null }) : { ...data, moves: null, vfx: vfxRevOk ? data.vfx : null });
+  if (overrides.length) {
+    console.warn(`[tuning] 存档覆盖了 ${overrides.length} 个字段（面板里点「用代码默认值覆盖存档」可清掉）`);
+    console.warn('[tuning] ' + overrides.slice(0, 8).join(' | '));
+  }
+  CFG.paused = false;   // 无论如何都以「未暂停」启动
+  CFG.timeScale = 1;
+  window.__tuningLoaded = ok;
+  if (ok) console.log('[tuning] 已载入存档调参');
+  return ok;
+}
+
+let __tuningSaving = false;
+async function tuningSave(silent = true) {
+  const snap = tuningSnapshot();
+  const text = JSON.stringify(snap);
+  try { localStorage.setItem(TUNING_KEY, text); } catch { /* 隐私模式忽略 */ }
+  try {
+    if (!__tuningSaving) {
+      __tuningSaving = true;
+      await fetch('/api/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+      if (!silent) console.log('[tuning] 已写入 data/tuning.json');
+    }
+  } catch { /* 离线也不影响本地存档 */ }
+  finally { __tuningSaving = false; }
+  window.__tuningSavedAt = Date.now();
+}
+
+async function tuningClear() {
+  try { localStorage.removeItem(TUNING_KEY); } catch { /* 忽略 */ }
+  try { await fetch('/api/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* 忽略 */ }
+}
+
+await tuningLoad();   // 必须在建角色 / 建面板之前跑完
+
+// 自动保存：值有变化就写盘（1s 轮询，比给每个滑条挂 onChange 稳）
+let __tuningLast = JSON.stringify(tuningSnapshot());
+setInterval(() => {
+  const now = JSON.stringify(tuningSnapshot());
+  if (now !== __tuningLast) { __tuningLast = now; tuningSave(); }
+}, 1000);
+addEventListener('beforeunload', () => { tuningSave(); });
+
+// ═══════════════════════════════════════════════════════════════
 //  0. 渲染基础设施
 // ═══════════════════════════════════════════════════════════════
 // 关掉 MSAA：集成显卡上 4x MSAA 几乎等于把像素成本翻倍；改在后期用 FXAA，画质接近、成本极低
@@ -396,7 +531,15 @@ const player = new Actor({
   name: 'PLAYER', isBoss: false, scale: 1.0, pos: [0, 8],
   hp: 1200, poise: 100, hurt: { radius: 0.40, height: 1.95 },
 });
-if (location.search.includes('debug')) window.__player = player;   // ?debug 排查用
+if (location.search.includes('debug')) {
+  window.__player = player;   // ?debug 排查用
+  window.__MOVES = MOVES;     // 帧数据表（联调 / 持久化自检）
+  window.__CFG = CFG;
+  window.__VFX_CFG = VFX_CFG;
+  window.__vfx = vfx;          // 剑轨 / 特效调试
+  window.__tuningSave = () => tuningSave(false);
+  window.__tuningClear = () => tuningClear();
+}
 const boss = new Actor({
   name: 'BOSS', isBoss: true, scale: 2.6, pos: [0, -8],
   hp: 3200, poise: 120, hurt: { radius: 1.15, height: 4.6 },
@@ -590,6 +733,7 @@ function playerTick() {
     case 'light1':
     case 'light2':
     case 'light3':
+    case 'light4':
     case 'heavy':
     case 'heavy2':
     case 'heavy3': {
@@ -604,6 +748,7 @@ function playerTick() {
         const CHAIN = {
           light1: ['light2', 'p_light2', 'light'],
           light2: ['light3', 'p_light3', 'light'],
+          light3: ['light4', 'p_light4', 'light'],
           heavy: ['heavy2', 'p_heavy2', 'heavy'],
           heavy2: ['heavy3', 'p_heavy3', 'heavy'],
         };
@@ -1051,6 +1196,76 @@ function spawnSwingVFX(a) {
   if (!m || m.active <= 0) return;
   if (a.frame !== m.startup) return;
   vfx.swingFromActor(a, m);
+}
+
+// ── 剑轨采样：从武器组拿「刃根 / 刃尖」世界坐标 ─────────────────
+const _trailBase = new THREE.Vector3();
+const _trailTip = new THREE.Vector3();
+const _trailDir = new THREE.Vector3();
+const ATTACK_STATE_RE = /^(light\d|heavy\d?|attack)$/;
+
+/**
+ * 量出武器「剑身」在组本地坐标里的跨度：不假设是 +Y，
+ * 直接对组内网格求本地包围盒，取最长轴的两端（握把端 / 剑尖端）。
+ * 结果缓存在武器组的 userData 上，只在第一次调用时算一次。
+ */
+const _bladeInv = new THREE.Matrix4();
+const _bladeM = new THREE.Matrix4();
+const _bladeV = new THREE.Vector3();
+const _bladeMin = new THREE.Vector3();
+const _bladeMax = new THREE.Vector3();
+function bladeSpan(group) {
+  if (group.userData.bladeSpan) return group.userData.bladeSpan;
+  group.updateWorldMatrix(true, true);
+  _bladeInv.copy(group.matrixWorld).invert();
+  _bladeMin.set(Infinity, Infinity, Infinity);
+  _bladeMax.set(-Infinity, -Infinity, -Infinity);
+  group.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    _bladeM.copy(_bladeInv).multiply(o.matrixWorld);
+    const pa = o.geometry.attributes.position;
+    const step = Math.max(1, Math.floor(pa.count / 400));
+    for (let i = 0; i < pa.count; i += step) {
+      _bladeV.fromBufferAttribute(pa, i).applyMatrix4(_bladeM);
+      _bladeMin.min(_bladeV);
+      _bladeMax.max(_bladeV);
+    }
+  });
+  const size = _bladeMax.clone().sub(_bladeMin);
+  const axis = size.x >= size.y && size.x >= size.z ? 'x' : (size.y >= size.z ? 'y' : 'z');
+  const span = { axis, lo: _bladeMin[axis], hi: _bladeMax[axis] };
+  group.userData.bladeSpan = span;
+  return span;
+}
+
+/**
+ * 每帧调用。只要角色处于出招状态就持续采样，
+ * 挥得快 → 同一时间窗内扫过的路径更长；停下 → 旧采样自然淡出。
+ */
+function feedBladeTrail(key, a, dt) {
+  if (!vfx.trails || !vfx.trails[key]) return;
+  const swinging = !!a && ATTACK_STATE_RE.test(a.state);
+  const group = a && a.binder && a.binder.weaponGroup;
+  if (!swinging || !group) { vfx.feedTrail(key, null, null, dt, false); return; }
+
+  // 用实测的剑身跨度取两端（不再假设本地 +Y 就是刃向）
+  const span = bladeSpan(group);
+  group.updateWorldMatrix(true, false);
+  _trailBase.set(0, 0, 0);
+  _trailTip.set(0, 0, 0);
+  _trailBase[span.axis] = span.lo;
+  _trailTip[span.axis] = span.hi;
+  _trailBase.applyMatrix4(group.matrixWorld);
+  _trailTip.applyMatrix4(group.matrixWorld);
+
+  // 沿刃身「平行下移」一段：让光带正好压住整条剑身（负值 = 往护手方向挪）
+  const shift = VFX_CFG.trailShift ?? 0;
+  if (shift) {
+    _trailDir.copy(_trailTip).sub(_trailBase).normalize();
+    _trailBase.addScaledVector(_trailDir, shift);
+    _trailTip.addScaledVector(_trailDir, shift);
+  }
+  vfx.feedTrail(key, _trailBase, _trailTip, dt, true);
 }
 
 function tick() {
@@ -1557,7 +1772,12 @@ function render(dtReal) {
   applyActorPose(boss, dtReal);
 
   // 特效推进：顿帧时冻结（打在铁上那一下要「停」住）
-  vfx.update(CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale);
+  const dtVfx = CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale;
+  vfx.update(dtVfx);
+
+  // ── 真实剑轨：按「刃根 → 刃尖」逐帧采样，扇形由剑自己扫出来 ──
+  feedBladeTrail('player', player, dtVfx);
+  feedBladeTrail('boss', boss, dtVfx);
 
   const _q = gpuTimer ? gpuTimer.begin() : null;
   composer.render();
@@ -1772,10 +1992,39 @@ fDebug.add(CFG, 'hitstop', 0, 16, 1).name('命中冻结帧');
 fDebug.add({ fn: resetFight }, 'fn').name('重开 (R)');
 fDebug.add({ fn: downloadJSON }, 'fn').name('导出帧表 (P)');
 
+// 调参存档：改完自动保存；这里给手动按钮和状态显示
+const fSave = gui.addFolder('调参存档');
+const saveState = {
+  status: () => (window.__tuningLoaded ? '已载入存档' : '使用默认值'),
+  save: () => tuningSave(false).then(() => { saveState.info = '已保存'; }),
+  clear: () => tuningClear().then(() => { saveState.info = '已清除，按 R 或刷新后恢复默认'; }),
+  info: '',
+};
+fSave.add(saveState, 'save').name('保存到文件 / 浏览器');
+fSave.add(saveState, 'clear').name('清除存档');
+  fSave.add({ fn: async () => {
+    await tuningClear();
+    __tuningLast = JSON.stringify(tuningSnapshot());
+    await tuningSave(false);
+    saveState.info = '已用当前代码默认值重建存档';
+  } }, 'fn').name('用代码默认值覆盖存档');
+fSave.add(saveState, 'status').name('→ 载入状态').disable();
+fSave.add(saveState, 'info').name('→ 操作结果').disable();
+fSave.open();
+
 const fVfx = gui.addFolder('近战特效');
 fVfx.add(VFX_CFG, 'enabled').name('开启');
 fVfx.add(VFX_CFG, 'intensity', 0, 2, 0.05).name('强度');
 fVfx.add(VFX_CFG, 'slashLife', 0.4, 2.5, 0.05).name('刀光时长倍率');
+fVfx.add(VFX_CFG, 'trail').name('剑轨（跟刃白光）');
+fVfx.add(VFX_CFG, 'trailPurple').name('紫色配色（Unity 包）');
+fVfx.add(VFX_CFG, 'trailMap').name('月牙贴图');
+fVfx.add(VFX_CFG, 'trailMapTile', 0.25, 4, 0.05).name('贴图平铺次数');
+fVfx.add(VFX_CFG, 'trailShift', -0.8, 0.8, 0.02).name('沿剑身平移(m)');
+fVfx.add(VFX_CFG, 'trailLife', 0.08, 0.8, 0.01).name('剑轨拖尾(秒)');
+fVfx.add(VFX_CFG, 'trailIntensity', 0.1, 3, 0.05).name('剑轨亮度');
+fVfx.add(VFX_CFG, 'trailBoss').name('Boss 也有剑轨');
+fVfx.add(VFX_CFG, 'arc').name('旧弧光（对比用）');
 fVfx.add(VFX_CFG, 'sparkCount', 0, 40, 1).name('火花数量');
 fVfx.add(VFX_CFG, 'telegraph').name('Boss 起手预警');
 fVfx.add(VFX_CFG, 'telegraphStart', 0, 1, 0.05).name('起手亮度');
