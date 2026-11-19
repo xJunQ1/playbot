@@ -7,7 +7,7 @@ const KEY = 'souls-demo-settings';
 const DEFAULTS = {
   preset: 'high',
   res: 1,
-  ao: 'high',     // off | low(8) | mid(16) | high(24)
+  ao: 'off',      // off | low(8) | mid(16) | high(24)  —— 默认关：GTAO 会在舞台镂空装饰上糊黑斑
   shadow: true,
   decor: true,
   dpr: 2,
@@ -23,15 +23,15 @@ const DEFAULTS = {
 const PRESETS = {
   low:  { res: 0.7, ao: 'off', decor: false },
   mid:  { res: 1.0, ao: 'off', decor: true },
-  high: { res: 1.0, ao: 'high', decor: true },
+  high: { res: 1.0, ao: 'off', decor: true },   // 预设「高」也不再开 AO（会出黑斑）
 };
 
 export function createSettings(ctx) {
   const { renderer, composer, gtao, camera, scene, STAGE, CFG, gpuName, keymap, defaultKeys, onKeymapChange, onPreset, sharpen, syncSharpen, bloom, smaa, fxaa } = ctx;
 
-  // 设置表结构版本：v2 = 超采样 1.5x / AO 高 / SMAA；v3 = FOV 默认 35。
+  // 设置表结构版本：v2 = 超采样 1.5x；v3 = FOV 默认 35；v4 = 环境光遮蔽默认关。
   // 老存档（没有 v 字段）里这几个键会丢掉，让新版默认值生效，其它个人项（体积、键位等）保留。
-  const SCHEMA = 3;
+  const SCHEMA = 4;
   const RESET_ON_MIGRATE = ['ss', 'ao', 'aa', 'fov'];
 
   let state = Object.assign({}, DEFAULTS, (() => {
@@ -82,8 +82,8 @@ export function createSettings(ctx) {
     const fog = scene && scene.fog;
     if (fog) {
       const t = Math.min(1, Math.max(0, state.fog ?? 0.42));
-      fog.near = 260 - t * 230;
-      fog.far = 700 - t * 560;
+      // 舞台直径 ~44m：原来 30~700 的映射等于没有雾，舞台外直接露出近黑背景
+      fog.near = 120 - t * 70;    // t=0 → 120m 几乎无雾；t=1 → 50m 浓雾
     }
 
     // 泛光：0 = 关

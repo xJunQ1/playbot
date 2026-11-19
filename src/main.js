@@ -15,6 +15,7 @@ import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { poseFor } from './pose.js';
 import { FootIK } from './footik.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
+import { guardFromAO } from './vfx/ao-guard.js';
 import { GroundScratch } from './vfx/scratch.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -173,14 +174,53 @@ renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0c0e);
-scene.fog = new THREE.Fog(0x0b0c0e, 34, 62);
+// 背景/雾跟着舞台的紫调走：原来是近黑色，舞台外的远景会被压成一片死黑
+scene.background = new THREE.Color(0x191226);
+scene.fog = new THREE.Fog(0x241a33, 70, 190);
 
 const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 1200);
 camera.position.set(0, 6, 10);
 
 // 擂台：和展示页共用 stage.js 里同一份美术（浮空要塞 · 猩红魔法竞技场）
 const STAGE = buildStage(scene, { magicOpacity: 0.42 });
+
+// 舞台里的「透明 / 镂空」装饰（红叶、藤蔓、裂纹贴花、法阵光带）不能进 GTAO 预通道：
+// 那一遍会把它们当实心几何，镂空处就在墙上糊出一块块黑斑。
+{
+  let n = 0;
+  const guarded = [];
+  STAGE.root.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      if (m.transparent || (m.alphaTest && m.alphaTest > 0) || m.blending === THREE.AdditiveBlending) {
+        guardFromAO(o, m);
+        guarded.push(o);
+        n++;
+      }
+    }
+  });
+  if (n) console.log('[stage] 排除 AO 预通道的透明装饰:', n);
+  window.__aoGuarded = guarded;   // 排查用：可临时恢复 onBeforeRender 对比
+}
+// 舞台贴图统一开到显卡支持的最大各向异性：细金线在斜视时才不会闪没
+{
+  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  STAGE.root.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      for (const key of ['map', 'normalMap', 'roughnessMap', 'emissiveMap']) {
+        const tex = m[key];
+        if (tex && tex.anisotropy !== maxAniso) { tex.anisotropy = maxAniso; tex.needsUpdate = true; }
+      }
+    }
+  });
+  console.log('[stage] 贴图各向异性 →', maxAniso);
+}
+
 const ARENA = { half: STAGE.radius };   // 兼容旧引用，实际边界用圆形
 
 // 近战特效（刀光 / 命中火花 / 弹反），纯程序化，不依赖外部资源
@@ -537,6 +577,8 @@ if (location.search.includes('debug')) {
   window.__CFG = CFG;
   window.__VFX_CFG = VFX_CFG;
   window.__vfx = vfx;          // 剑轨 / 特效调试
+  window.__camera = camera;    // 相机（截图 / 取景排查用）
+  window.__scene = scene;      // 场景（材质 / 灯光排查用）
   window.__tuningSave = () => tuningSave(false);
   window.__tuningClear = () => tuningClear();
 }
