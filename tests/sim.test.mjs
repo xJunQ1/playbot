@@ -7,13 +7,15 @@ const ok = (name, cond, extra = '') => {
 };
 
 console.log('\n[帧表]');
-ok('p_heavy 总帧 = 80', totalFrames(MOVES.p_heavy) === 80, totalFrames(MOVES.p_heavy));
+ok('重击三连段齐全', ['p_heavy', 'p_heavy2', 'p_heavy3'].every((id) => !!MOVES[id]));
+ok('p_heavy 首段 30 帧', totalFrames(MOVES.p_heavy) === 30, totalFrames(MOVES.p_heavy));
 ok('b_sweep 总帧 = 90', totalFrames(MOVES.b_sweep) === 90, totalFrames(MOVES.b_sweep));
-ok('b_charge 判定落在起手后', MOVES.b_charge.startup === 13 && MOVES.b_charge.active === 10);
+ok('冲刺攻击已删除', MOVES.b_charge === undefined);
 
 console.log('\n[motion 曲线]');
 ok('motionAt 起点为 0', motionAt(MOVES.b_sweep, 0) === 0);
-ok('motionAt 动画结束后保持终值', motionAt(MOVES.b_charge, 200) === 5.6, motionAt(MOVES.b_charge, 200));
+const sweepEnd = MOVES.b_sweep.motion[MOVES.b_sweep.motion.length - 1][1];
+ok('motionAt 动画结束后保持终值', motionAt(MOVES.b_sweep, 200) === sweepEnd, motionAt(MOVES.b_sweep, 200));
 ok('motionAt 单调不减（sweep）', (() => {
   let prev = -1;
   for (let f = 0; f <= 90; f++) { const d = motionAt(MOVES.b_sweep, f); if (d < prev - 1e-9) return false; prev = d; }
@@ -47,8 +49,7 @@ const pick = (dist, recent = []) => {
   return pool;
 };
 const far = pick(12);
-ok('远距离突进权重最高', far.sort((a, b) => b.w - a.w)[0].id === 'b_charge',
-  JSON.stringify(far));
+ok('远距离只剩怒吼（突刺已删）', far.length === 1 && far[0].id === 'b_roar', JSON.stringify(far));
 ok('贴身有 sweep/slam/roar', pick(2).length >= 3, pick(2).length);
 ok('三连禁止生效', pick(2, ['b_sweep', 'b_slam', 'b_roar']).length === 0);
 ok('每个距离至少 1 招', [0.5, 2, 4, 6, 8, 12, 15].every(d => pick(d).length > 0));

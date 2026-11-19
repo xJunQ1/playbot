@@ -585,10 +585,11 @@ function resolveHit(attacker, defender, hb) {
   applyDamage(attacker, defender, attacker.move);
 }
 
-// ── Boss 霸体 ────────────────────────────────────────────────
-// 3 秒内被打出超过 5 次僵直 → 强制解除僵直、回到正常状态，并给 3 秒霸体。
-// 霸体期间：无视受击僵直、可以继续攻击，但血量照扣。
-const BOSS_ARMOR = { windowFrames: 180, maxStuns: 5, durationFrames: 180 };
+// ── Boss 超霸体 ──────────────────────────────────────────────
+// 2 秒内连续受击 5 次 → 触发「超霸体」，持续 10 秒。
+//   超霸体期间：不产生受击僵直（血量照扣），出招也不会延长超霸体。
+// 另外：Boss 只要在出招，整段攻击都是霸体，不会被玩家的攻击打断。
+const BOSS_ARMOR = { windowFrames: 120, maxStuns: 5, durationFrames: 600 };
 
 /** 记一次僵直；返回 true 表示这次应该免疫（已经霸体 / 刚触发霸体） */
 function registerBossStun() {
@@ -600,13 +601,16 @@ function registerBossStun() {
   boss.stunMarks = boss.stunMarks.filter((f) => logicFrame - f <= BOSS_ARMOR.windowFrames);
   boss.stunMarks.push(logicFrame);
 
-  if (boss.stunMarks.length > BOSS_ARMOR.maxStuns) {
+  if (boss.stunMarks.length >= BOSS_ARMOR.maxStuns) {
     boss.stunMarks.length = 0;
     boss.armorUntil = logicFrame + BOSS_ARMOR.durationFrames;
-    boss.setState('idle');
-    boss.stunTimer = 0;
-    banner('霸体', 800);
-    console.log('[boss] 3 秒内僵直 > 5 次 → 霸体 3 秒（logicFrame', logicFrame, '）');
+    // 只解除当前僵直；正在出招就不打断它
+    if (boss.state === 'hitstun') {
+      boss.setState('idle');
+      boss.stunTimer = 0;
+    }
+    banner('超霸体', 1000);
+    console.log('[boss] 2 秒内连续受击 5 次 → 超霸体 10 秒（logicFrame', logicFrame, '）');
     return true;
   }
   return false;
@@ -624,7 +628,7 @@ function applyDamage(attacker, defender, move) {
     if (player.frame <= parryEnd) {
       // 弹反成功
       boss.poise = Math.max(0, boss.poise - 60);
-      if (!registerBossStun()) {   // 霸体时弹反也不吃僵直
+      if (!registerBossStun() && boss.state !== 'attack') {   // 超霸体 / 出招中都不吃僵直
         boss.setState('hitstun');
         boss.stunTimer = 90;
       }
@@ -652,12 +656,32 @@ function applyDamage(attacker, defender, move) {
     return;
   }
 
+  // Boss 架招：减伤 70%，不吃硬直，只掉韧性；韧性打空照样破防
+  if (defender === boss && boss.state === 'block') {
+    defender.hp = Math.max(0, defender.hp - move.damage * 0.30);
+    defender.poise = Math.max(0, defender.poise - move.damage * 0.22);
+    defender.flashTimer = 3;
+    shake(0.05);
+    hitstop(HITSTOP_LIGHT());
+    vfx.guard(boss);
+    if (defender.poise <= 0) {
+      defender.setState('hitstun');
+      defender.stunTimer = 40;
+      defender.poise = defender.maxPoise * 0.5;
+    }
+    return;
+  }
+
   const dmg = move.damage;
   defender.hp = Math.max(0, defender.hp - dmg);
   defender.poise = Math.max(0, defender.poise - move.poise);
-  // Boss 有霸体判定：掉血照常，僵直可能被免疫
+  // Boss 霸体判定：
+  //   · 超霸体生效中 → 不产生受击僵直
+  //   · 正在出招     → 整段攻击都是霸体，不会被打断
+  // 两种情况血量都照扣。
   const bossImmune = defender === boss ? registerBossStun() : false;
-  if (!bossImmune) {
+  const bossAttacking = defender === boss && boss.state === 'attack';
+  if (!bossImmune && !bossAttacking) {
     defender.setState('hitstun');
     defender.stunTimer = move.hitstun;
   }
@@ -665,7 +689,7 @@ function applyDamage(attacker, defender, move) {
 
   // 削韧满：强制长硬直
   if (defender.poise <= 0 && defender === boss) {
-    if (!bossImmune) defender.stunTimer = 110;   // 霸体期间连削韧硬直也免疫
+    if (!bossImmune && !bossAttacking) defender.stunTimer = 110;   // 超霸体 / 出招中都免疫
     defender.poise = defender.maxPoise;
   }
 
@@ -976,11 +1000,10 @@ function moveBossByIntent(toPlayer, dist, stopDist) {
 }
 
 function pickBossMove(dist) {
-  const pool = [];
+  const all = [];      // 射程内 + 冷却好了的招
   for (const [id, m] of Object.entries(MOVES)) {
     if (!id.startsWith('b_')) continue;
     if (dist < m.minRange || dist > m.maxRange) continue;
-    if (AI.recent.includes(id)) continue;
     const cdScale = CFG.bossCooldownScale * (AI.phase2 ? 0.72 : 1);
     const ready = (logicFrame - (AI.cooldowns?.[id] ?? -999)) > m.cooldown * 60 * cdScale;
     if (!ready) continue;
@@ -995,8 +1018,13 @@ function pickBossMove(dist) {
       const fastness = 1 - Math.min(1, m.startup / 60);
       w *= 1 + fastness * 1.8;
     }
-    pool.push({ id, w });
+    // 反重复用「降权」而不是「禁用」：Boss 只有 3 个攻击，
+    // 硬禁掉最近两招会让池子里只剩 1 个 → 每次靠近都放同一招（看着像固定的）。
+    if (AI.recent[AI.recent.length - 1] === id) w *= 0.30;   // 刚用过的明显降权
+    else if (AI.recent.includes(id)) w *= 0.70;              // 更早用过的小幅降权
+    all.push({ id, w });
   }
+  const pool = all;
   if (!pool.length) return null;
   const sum = pool.reduce((s, p) => s + p.w, 0);
   let r = rng() * sum;
@@ -1021,6 +1049,16 @@ function bossTick() {
 
   switch (boss.state) {
     case 'dead': boss.frame++; return;
+
+    case 'block':
+      // 架招：面向玩家站定，时间到解除
+      boss.turnToward(targetYaw, CFG.bossTurnFrames);
+      boss.frame++;
+      if (logicFrame >= (AI.blockUntil ?? 0)) {
+        boss.setState('idle');
+        AI.gapFrames = Math.max(AI.gapFrames, 8);
+      }
+      return;
 
     case 'hitstun':
       boss.frame++;
@@ -1060,16 +1098,11 @@ function bossTick() {
         boss.stepMotion();
 
         if (boss.frame >= totalFrames(boss.move)) {
-          const finished = boss.moveId;
           boss.setState('idle');
           AI.lastMoveFrame = logicFrame;
           AI.gapFrames = Math.round(CFG.bossComboGap * 60 * (0.7 + rng() * 0.6) * (AI.phase2 ? 0.78 : 1));
           AI.feintChecked = false;
-          // 二阶段专属：突进结束后如果还在身前，立刻接一记下砸（二连）
-          if (AI.phase2 && finished === 'b_charge') {
-            const dd = Math.hypot(player.pos.x - boss.pos.x, player.pos.z - boss.pos.z);
-            if (dd < 8) { boss.setState('attack', 'b_slam'); AI.gapFrames = 0; }
-          }
+
         }
         return;
       }
@@ -1101,10 +1134,21 @@ function bossTick() {
       }
 
       // ── 看破：玩家正在起手（还在 startup 段），Boss 有概率后撤躲开 ──
-      const playerWinding = (player.state === 'light1' || player.state === 'light2'
-        || player.state === 'heavy')
+      // 连招合并后玩家有 light1~4 / heavy~heavy3，用前缀判断，新加招式不用再改这里
+      const playerWinding = (player.state.startsWith('light') || player.state.startsWith('heavy'))
         && player.move
         && player.frame < player.move.startup;
+      // ── 架招：玩家起手时按概率举盾格挡（和「看破后撤」并存，先判格挡）──
+      if (playerWinding && dist < 6.5 && logicFrame > (AI.nextBlock ?? 0)) {
+        AI.nextBlock = logicFrame + (CFG.bossBlockCooldown ?? 150);
+        if (rng() < (CFG.bossBlockChance ?? 0.35)) {
+          boss.setState('block');
+          AI.blockUntil = logicFrame + (CFG.bossBlockFrames ?? 34);
+          boss.moving = false;
+          return;
+        }
+      }
+
       if (playerWinding && dist < 6 && logicFrame > AI.nextDodge) {
         AI.nextDodge = logicFrame + 75;
         if (rng() < (CFG.bossDodgeChance ?? 0.35)) {
@@ -1151,7 +1195,7 @@ function bossTick() {
       const id = pickBossMove(dist);
       if (id) {
         AI.recent.push(id);
-        if (AI.recent.length > 3) AI.recent.shift();
+        if (AI.recent.length > 2) AI.recent.shift();
         AI.cooldowns ??= {};
         AI.cooldowns[id] = logicFrame;
         AI.feintChecked = false;
@@ -1196,6 +1240,8 @@ function spawnSwingVFX(a) {
   if (!m || m.active <= 0) return;
   if (a.frame !== m.startup) return;
   vfx.swingFromActor(a, m);
+  // free_slash_vfx 的新月贴图：只给 Boss 加一层（玩家已有紫色剑轨）
+  if (a.isBoss) vfx.crescentSlash(a, m);
 }
 
 // ── 剑轨采样：从武器组拿「刃根 / 刃尖」世界坐标 ─────────────────
@@ -2002,12 +2048,14 @@ const saveState = {
 };
 fSave.add(saveState, 'save').name('保存到文件 / 浏览器');
 fSave.add(saveState, 'clear').name('清除存档');
-  fSave.add({ fn: async () => {
+fSave.add({
+  fn: async () => {
     await tuningClear();
     __tuningLast = JSON.stringify(tuningSnapshot());
     await tuningSave(false);
     saveState.info = '已用当前代码默认值重建存档';
-  } }, 'fn').name('用代码默认值覆盖存档');
+  }
+}, 'fn').name('用代码默认值覆盖存档');
 fSave.add(saveState, 'status').name('→ 载入状态').disable();
 fSave.add(saveState, 'info').name('→ 操作结果').disable();
 fSave.open();
@@ -2085,7 +2133,9 @@ function resetFight() {
   player.reset([0, 8], Math.PI);
   boss.reset([0, -8], 0);
   AI.recent = [];
-  AI.lastMoveFrame = -999;
+  // 不能写 -999：那会让 logicFrame - lastMoveFrame 恒大于 gapFrames，
+  // 开局的 90 帧等待直接失效，Boss 第 0 帧就会出手（表现为一加载就前冲一下）。
+  AI.lastMoveFrame = 0;
   AI.gapFrames = 90;
   STAGE.setPhase(1);
   if (typeof snapCamera === 'function') snapCamera();
@@ -2220,16 +2270,16 @@ function resetFight() {
           console.warn('[boss-anim] 自带动作包加载失败，回退 Mixamo:', e);
         }
 
-        // boss动作/ 里的 5 段动作（FBX → 轨道 JSON），覆盖同名 clip
+        // boss动作/ 里的动作（FBX / GLB → 轨道 JSON），按骨骼名直接套（raw）
+        // 走路沿用原文件，其余全部来自 boss动作/
         const jsonClips = [
-          // 新 Boss 是 Mixamo 骨架，这 5 段动作同名，直接播放（raw）
           ['walk', 'assets/anims/走路.json', false],
           ['hit', 'assets/anims/受击.json', false],
           ['block', 'assets/anims/格挡.json', false],
-          // 转身横扫：髋骨有接近 180° 的转体，只有同名骨架能正确播放，raw 模式没问题
-          // 套上去整个身子会翻过来（看起来像横躺）。先不用，b_sweep 回退到 boss_anims 的 slash。
           ['sweep', 'assets/anims/转身横扫.json', false],
-          ['dead', 'assets/anims/受左横劈死亡.json', false],
+          ['dead', 'assets/anims/死亡.json', false],
+          ['combo1', 'assets/anims/连招1.json', false],   // boss连招1.glb
+          ['combo2', 'assets/anims/连招2.json', false],   // boss连招2.glb
         ];
         for (const [name, url, slice] of jsonClips) {
           try {
@@ -2248,9 +2298,9 @@ function resetFight() {
             moveback: 'walk',
             blockmove: 'walk',
             block: 'block',
-            b_sweep: 'sweep',
-            b_slam: 'Great_Sword_Slash',
-            b_charge: 'sweep',
+            b_sweep: 'combo1',
+            b_slam: 'combo2',
+            b_roar: 'cast',
             hitstun: 'hit',
             guardbreak: 'hit',
             dead: 'dead',

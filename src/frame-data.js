@@ -26,9 +26,12 @@ export const CFG = {
   bossCooldownScale: 1.0,
 
   // Boss 的「额外行为」概率（调参用）
-  bossFeintChance: 0.12,    // 佯攻：起手到一半取消
+  bossFeintChance: 0,       // 佯攻：起手到一半取消（0 = 关；攻击一旦出手就打到底）
   bossDodgeChance: 0.35,    // 看破：玩家起手时后撤
   bossBackstepChance: 0.28, // 贴身弹开概率（内部还有冷却）
+  bossBlockChance: 0.35,    // 架招：玩家起手时举盾格挡的概率
+  bossBlockFrames: 34,      // 一次架招持续帧数
+  bossBlockCooldown: 150,   // 两次架招的最短间隔（帧）
 
   // 调试
   showHitbox: true,
@@ -111,7 +114,6 @@ export const MOVES = {
   // ── Boss ──────────────────────────────────────────────
   //   b_sweep   Great_Sword_High_Spin_Attack  strike@63/113 → 截到 93，90 帧
   //   b_slam    Sword_And_Shield_Slash        strike@42/212 → 截到 76，90 帧
-  //   b_charge  Standing_Dodge_Forward        strike@18/60  → 截到 46，60 帧
   b_sweep: {
     label: '横扫（中）',
     swing: 'horizontal',
@@ -132,15 +134,7 @@ export const MOVES = {
     hitbox: { offset: 1.05, radius: 0.70, yMin: 0.0, yMax: 0.52 },
     minRange: 0, maxRange: 4.5, weight: 0.85, cooldown: 2.0,
   },
-  b_charge: {
-    label: '突进（快）', swing: 'thrust',
-    startup: 13, active: 10, recovery: 37, cancelFrom: 14,
-    damage: 280, poise: 0, hitstun: 26, stamina: 0,
-    motion: [[0, 0], [13, 0.0], [21, 3.40], [32, 5.60], [60, 5.60]],
-    // 突进靠位移命中，判定框本身收窄：0.55×2.6=1.43m 前方、0.40×2.6=1.04m 半径
-    hitbox: { offset: 0.55, radius: 0.40, yMin: 0.0, yMax: 1.30 },
-    minRange: 6.0, maxRange: 16.0, weight: 1.1, cooldown: 2.6,
-  },
+
   b_roar: {
     label: '怒吼（免费招）', swing: 'none',
     startup: 110, active: 0, recovery: 40, cancelFrom: 0,

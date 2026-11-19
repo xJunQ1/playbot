@@ -17,6 +17,18 @@ import { BladeTrail } from './blade-trail.js';
 import { guardFromAO } from './ao-guard.js';
 
 // free_slash_vfx 的月牙刀光贴图（作为剑轨遮罩）
+// free_slash_vfx 的红色版刀光（由蓝色月牙按 Fire 版配色重新着色）
+let _slashRedMap = null;
+function slashRedMap() {
+  if (_slashRedMap !== null) return _slashRedMap || null;
+  if (typeof document === 'undefined') return (_slashRedMap = false);
+  _slashRedMap = new THREE.TextureLoader().load('assets/vfx/Slash_Noise_Red.png');
+  _slashRedMap.colorSpace = THREE.SRGBColorSpace;
+  _slashRedMap.wrapS = THREE.ClampToEdgeWrapping;
+  _slashRedMap.wrapT = THREE.ClampToEdgeWrapping;
+  return _slashRedMap;
+}
+
 let _slashMap = null;
 function slashMap() {
   if (_slashMap !== null) return _slashMap || null;
@@ -52,6 +64,18 @@ export const VFX_CFG = {
   trailPurple: true,       // 用 Unity 包里的紫色配色（关掉=纯白）
   trailCore: '#9d5bff',    // 刃尖核心色（亮紫）
   trailEdge: '#3a08b8',    // 刃根边缘色（深紫）
+
+  // Boss 刀光配色（原来是一套暖橙，和紫色剑轨不统一）
+  bossTrailCore: '#ff7a50',  // 刃尖核心：橙红
+  bossTrailEdge: '#c41008',  // 刃根边缘：深红
+  crescentRed: true,         // true = 用红色版贴图（free_slash_vfx 的 Fire 配色）
+  crescentColor: 0xffffff,   // 贴图本身已是红色，这里保持白
+
+  // ── Boss 新月斩击（free_slash_vfx 的 Slash Noise 贴图）──────────
+  crescent: true,          // Boss 挥砍时额外贴一张新月面片
+  crescentLife: 0.22,      // 存活秒数
+  crescentScale: 2.1,      // 面片尺寸 = (判定 offset+radius) × 该倍率
+  crescentTilt: 0.35,      // 横扫面片的抬升角（越大越像斜着甩）
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -211,7 +235,7 @@ export class MeleeVFX {
       player: new BladeTrail(scene, { life: VFX_CFG.trailLife, maxSamples: 72 }),
       boss: new BladeTrail(scene, { life: VFX_CFG.trailLife, maxSamples: 72 }),
     };
-    this.trails.boss.setColors(0xfff4e2, 0xffb066);
+    this.trails.boss.setColors(VFX_CFG.bossTrailCore, VFX_CFG.bossTrailEdge);
   }
 
   get activeCount() { return this.effects.length; }
@@ -258,8 +282,8 @@ export class MeleeVFX {
     const radius = clamp((hb.offset + hb.radius) * scale * 1.12, 0.85, 6.5);
     const yBase = (hb.yMin + hb.yMax) * 0.5 * scale;
 
-    const colorA = isBoss ? 0xffdcb4 : 0xffffff;
-    const colorB = isBoss ? 0xff6a2b : 0x8fd3ff;
+    const colorA = isBoss ? 0xd9c4ff : 0xffffff;
+    const colorB = isBoss ? 0x8a3cff : 0x8fd3ff;
 
     const angle = shape === 'vertical' ? 1.85 : shape === 'thrust' ? 0.55 : 2.0;
     const inner = shape === 'vertical' ? 0.52 : shape === 'thrust' ? 0.10 : 0.58;
@@ -291,6 +315,64 @@ export class MeleeVFX {
         mat.uniforms.uFade.value = (1 - smoothstep(0.52, 1, t)) * clamp(VFX_CFG.intensity, 0, 2);
         const s = 1 + 0.10 * t;
         mesh.scale.set(s, s, s);
+        if (t >= 1) { this._drop(mesh); geo.dispose(); mat.dispose(); return false; }
+        return true;
+      },
+      dispose: () => { this._drop(mesh); geo.dispose(); mat.dispose(); },
+    };
+    this.effects.push(effect);
+    return effect;
+  }
+
+  /**
+   * 新月斩击面片：把 free_slash_vfx 的 Slash Noise 直接贴在扫击平面上。
+   *   横扫 → 面片躺在水平面（俯视能看清那道弧）
+   *   竖劈 → 面片立起来，正面朝向玩家
+   * 生命 ~0.22s：先快速亮起、再淡出，同时轻微放大 + 沿扫击方向转一点。
+   */
+  crescentSlash(actor, move) {
+    if (!VFX_CFG.crescent || !VFX_CFG.enabled) return null;
+    if (!actor || !move || !move.hitbox) return null;
+    const map = VFX_CFG.crescentRed ? slashRedMap() : slashMap();
+    if (!map) return null;
+
+    const scale = actor.scale ?? 1;
+    const hb = move.hitbox;
+    const size = clamp((hb.offset + hb.radius) * scale * (VFX_CFG.crescentScale ?? 2.1), 1.8, 11);
+    const yBase = (hb.yMin + hb.yMax) * 0.5 * scale;
+    const vertical = move.swing === 'vertical';
+
+    const geo = new THREE.PlaneGeometry(size, size);
+    const mat = new THREE.MeshBasicMaterial({
+      map,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      color: VFX_CFG.crescentColor,   // 白色：颜色已在贴图里
+      opacity: 0,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(actor.pos);
+    mesh.position.y += yBase;
+    mesh.rotation.order = 'YXZ';
+    mesh.rotation.y = actor.yaw;
+    mesh.rotation.x = vertical ? -0.18 : -Math.PI / 2 + (VFX_CFG.crescentTilt ?? 0.35);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 4;
+    this.scene.add(mesh);
+
+    const life = Math.max(0.08, (VFX_CFG.crescentLife ?? 0.22) * VFX_CFG.slashLife);
+    const spin = vertical ? 0 : 0.9;
+    let age = 0;
+    const effect = {
+      update: (dt) => {
+        age += dt;
+        const t = clamp(age / life, 0, 1);
+        mat.opacity = smoothstep(0, 0.18, t) * (1 - smoothstep(0.55, 1, t)) * clamp(VFX_CFG.intensity, 0, 2);
+        const s = 0.82 + 0.34 * t;
+        mesh.scale.set(s, s, s);
+        mesh.rotation.z = spin * t;
         if (t >= 1) { this._drop(mesh); geo.dispose(); mat.dispose(); return false; }
         return true;
       },
