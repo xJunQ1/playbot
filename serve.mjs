@@ -1,9 +1,10 @@
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, writeFile, mkdir } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname);
 const PORT = Number(process.env.PORT ?? 5173);
+const TUNING_FILE = join(ROOT, 'data', 'tuning.json');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -25,6 +26,32 @@ const MIME = {
 createServer(async (req, res) => {
   try {
     let pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+
+    // ── 调参持久化接口 ──────────────────────────────
+    // GET  /api/tuning  → 返回 data/tuning.json（不存在则 {}）
+    // POST /api/tuning  → 覆盖写入 data/tuning.json
+    if (pathname === '/api/tuning') {
+      if (req.method === 'GET') {
+        const body = await readFile(TUNING_FILE, 'utf8').catch(() => '{}');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(body);
+        return;
+      }
+      if (req.method === 'POST') {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const text = Buffer.concat(chunks).toString('utf8');
+        try { JSON.parse(text); } catch { res.writeHead(400).end('bad json'); return; }
+        await mkdir(join(ROOT, 'data'), { recursive: true });
+        await writeFile(TUNING_FILE, text, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end('{"ok":true}');
+        return;
+      }
+      res.writeHead(405).end('method not allowed');
+      return;
+    }
+
     if (pathname === '/') pathname = '/index.html';
     const file = normalize(join(ROOT, pathname));
     if (!file.startsWith(ROOT)) { res.writeHead(403).end('forbidden'); return; }

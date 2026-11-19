@@ -39,7 +39,7 @@ model.traverse((o) => { if (o.isBone) B[o.name] = o; });
 const HAND = B['mixamorigRightHand'];
 const HIPS = B['mixamorigHips'];
 
-const N = 96, dur = clip.duration;
+const N = parseInt(QS.get('n') || '96', 10), dur = clip.duration;
 const speeds = [];
 let prev = null;
 for (let i = 0; i <= N; i++) {

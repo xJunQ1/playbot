@@ -54,12 +54,13 @@ export const DEFAULT_CLIP_MAP = {
   dead: 'Death',
   // 三段按「动作类型」拉开，保证一眼能分出打到第几下：
   //   横劈 → 跳劈 → 旋身斩
-  p_light1: 'Stable_Sword_Inward_Slash',   // 轻击第一段
-  p_light2: 'Stable_Sword_Outward_Slash',  // 轻击第二段
-  p_light3: 'Light_3',                     // 轻击第三段（侧踢）
-  p_heavy: 'Great_Sword_Slash',
-  p_heavy2: 'Great_Sword_Attack',   // 重击第二段
-  p_heavy3: 'Heavy_3',              // 重击第三段
+  p_light1: 'LightCombo4_1',   // 轻击四段连招·第 1 段
+  p_light2: 'LightCombo4_2',   // 轻击四段连招·第 2 段
+  p_light3: 'LightCombo4_3',   // 轻击四段连招·第 3 段
+  p_light4: 'LightCombo4_4',   // 轻击四段连招·第 4 段
+  p_heavy: 'HeavyCombo1',      // 重击三连击·第 1 段
+  p_heavy2: 'HeavyCombo2',     // 重击三连击·第 2 段
+  p_heavy3: 'HeavyCombo3',     // 重击三连击·第 3 段
   b_sweep: 'Great_Sword_Attack',
   b_slam: 'Great_Sword_Slash',
   b_charge: 'Standing_Dodge_Forward',
@@ -154,8 +155,11 @@ export class ModelBinder {
         next.enabled = true;
         next.setEffectiveWeight(1);
         // 攻击 / 翻滚：单次播放，不循环
-        if (actor.state === 'roll' || actor.state.startsWith('light') ||
-            actor.state === 'heavy' || actor.state === 'attack') {
+        // 攻击/翻滚：单次播放，不循环（heavy2 / heavy3 / light4 也必须算进来，
+        // 否则播到片段末尾会绕回第 0 帧，表现为「结尾重复一帧」）
+        const onceState = actor.state === 'roll' || actor.state === 'attack'
+          || /^light\d*$/.test(actor.state) || /^heavy\d*$/.test(actor.state);
+        if (onceState) {
           next.setLoop(THREE.LoopOnce, 1);
           next.clampWhenFinished = true;
         } else {
@@ -179,9 +183,14 @@ export class ModelBinder {
           next.setEffectiveTimeScale(1);
         }
 
+        // 连段接缝：轻击/重击都是不同片段拼起来的，姿势差得多，
+        // 给更长的混入时间（0.16s），否则接缝处会"跳一下"
+        const COMBO_RE = /^(light\d|heavy\d?)$/;
+        const isComboSeam = COMBO_RE.test(actor.state) || (this.currentName || '').startsWith('HeavyCombo');
         if (prev && prev !== next) {
-          next.crossFadeFrom(prev, 0.08, false);   // 视觉淡入，逻辑早已切换
+          next.crossFadeFrom(prev, isComboSeam ? 0.16 : 0.08, false);   // 视觉淡入，逻辑早已切换
         }
+
         next.play();
         this.current = next;
         this.currentName = targetName;
@@ -231,43 +240,27 @@ export const LEG_ABDUCT_CLIPS = {
 };
 
 export const SOULS_PACK = {
+  // 只登记真正用到的片段。缺文件会让整包加载失败（模型全部定格），所以不留实验项。
   Idle: 'assets/player/Idle.glb',
   Walking: 'assets/player/Running.glb',
   Running: 'assets/player/Running.glb',
-  WalkBack: 'assets/Walking_Backwards_1_shortstride.glb',   // 1.20s/72f，步频比原版快
   Dive_Roll: 'assets/player/Dive_Roll.glb',
   Blocking: 'assets/player/Blocking.glb',
   BlockWalk: 'assets/sword_and_shield_walk.glb',   // 只取下半身，和 Blocking 合成 BlockMove
   Getting_Hit_Backwards: 'assets/player/Getting_Hit_Backwards.glb',
   Death: 'assets/player/Death.glb',
-  BlockingStance: 'assets/player/Blocking_v2.glb',
-  BlockingUp: 'assets/player/Blocking_stand_v2.glb',   // 站姿格挡：躯干摆正 + 剑横挡（v2）
-  SH_x30: 'assets/player/SH_x30.glb',
-  SH_x_30: 'assets/player/SH_x_30.glb',
-  SH_y30: 'assets/player/SH_y30.glb',
-  SH_y_30: 'assets/player/SH_y_30.glb',
-  SH_z30: 'assets/player/SH_z30.glb',
-  SH_z_30: 'assets/player/SH_z_30.glb',  BS_z30: 'assets/player/BS_z30.glb',
-  BS_z_30: 'assets/player/BS_z_30.glb',
-  BS_z60: 'assets/player/BS_z60.glb',
-  BS_z_60: 'assets/player/BS_z_60.glb',  BS_x25: 'assets/player/BS_x25.glb',
-  BS_x_25: 'assets/player/BS_x_25.glb',
-  BS_x45: 'assets/player/BS_x45.glb',
-  BS_x_45: 'assets/player/BS_x_45.glb',
-  Bh_x90: 'assets/player/Bh_x90.glb',
-  Bh_x_90: 'assets/player/Bh_x-90.glb',
-  Bh_z90: 'assets/player/Bh_z90.glb',
-  Bh_z_90: 'assets/player/Bh_z-90.glb',
-  Bh_y90: 'assets/player/Bh_y90.glb',
-  Backstep: 'assets/player/Backstep.glb',   // 后退：原始动作（膝 24.0 / 脚 19.4 cm，比例自然，不交叉不外翻）
+  Backstep: 'assets/player/Backstep.glb',   // 后退：原始动作（膝 24.0 / 脚 19.4 cm）
+  LightCombo4: 'assets/player/LightCombo4.glb',   // 轻击四段连招（一条动作，运行时切四段）
+  LightCombo: 'assets/player/LightCombo.glb',   // 轻击三连击（三段拼接成一条，运行时切三段）
+  HeavyCombo: 'assets/player/HeavyCombo_v2.glb',   // 重击三连击（剥网格 + 髋部抬高 + Y 钳制）
   Stable_Sword_Inward_Slash: 'assets/player/Stable_Sword_Inward_Slash.glb',
   Stable_Sword_Outward_Slash: 'assets/player/Stable_Sword_Outward_Slash.glb',
   Great_Sword_Slash: 'assets/player/Great_Sword_Slash.glb',
   Great_Sword_Attack: 'assets/player/Great_Sword_Attack.glb',
   Standing_Dodge_Forward: 'assets/Standing_Dodge_Forward.glb',
-  Light_3: 'assets/player/Light_3.glb',   // 轻击终结：旋身斩
-  Heavy_2: 'assets/player/Great_Sword_Attack.glb',          // 重击二段：跳劈
-  Heavy_3: 'assets/player/Heavy_3.glb',         // 重击终结：同一文件、更长的截取
+  Light_3: 'assets/player/Light_3.glb',
+  Heavy_2: 'assets/player/Great_Sword_Attack.glb',
+  Heavy_3: 'assets/player/Heavy_3.glb',
 };
 
 /**
@@ -568,6 +561,21 @@ const GRIP_FINGERS = [
   ['Pinky', 80, 94, 74],
   ['Thumb', 40, 46, 34],
 ];
+/**
+ * 把某个片段的髋部 Y 平移整体抬/降（米）。用于修「动作自带的髋高与角色身高不匹配」。
+ * 只动 Hips 的 position 轨道，不影响旋转，也不影响其它骨骼。
+ */
+export function shiftClipHipsY(clip, dy) {
+  if (!dy) return clip;
+  const out = [];
+  for (const tr of clip.tracks) {
+    if (tr.name !== 'mixamorigHips.position') { out.push(tr); continue; }
+    const v = tr.values.slice();
+    for (let i = 1; i < v.length; i += 3) v[i] += dy;
+    out.push(new THREE.VectorKeyframeTrack(tr.name, tr.times.slice(), v));
+  }
+  return new THREE.AnimationClip(clip.name, clip.duration, out);
+}
 export function applySwordGrip(root, side = 'Right') {
   const z = new THREE.Vector3(0, 0, 1);
   for (const [name, a1, a2, a3] of GRIP_FINGERS) {
@@ -698,6 +706,43 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
       // 一播到底会看到姿势跳一下 = 用户说的「重播」。这里精确切一个循环，首尾同相，循环无跳变。
       if (name === 'Backstep') {
         clip = sliceClip(clip, 0, Math.round(clip.duration * 60 * (1.86 / 2.55)), 60);
+
+      }
+
+      // 轻击三连击：三段素材先离线拼成一条连贯动作（接缝处姿势本来就一致），
+      // 这里按原来的截断长度把它重新切成三段 → 接缝与重击三连击同样的处理方式。
+      // 轻击四段连招：一条 4.00s 的连贯动作，按手速峰值切成四段
+      //   峰值 0.26s / 0.74s / 1.58s / 2.42s，谷底 0.62 / 1.34 / 1.94，2.60s 之后是静止收尾
+      if (name === 'LightCombo4') {
+        const L1 = Math.round(0.62 * 60);   // 37
+        const L2 = Math.round(1.34 * 60);   // 80
+        const L3 = Math.round(1.94 * 60);   // 116
+        const L4 = Math.round(2.60 * 60);   // 156
+        const fullL4 = clip;
+        // 源动作髋高整体下沉，四段各自补一点让脚贴地（实测校准值）
+        binder.clips.set('LightCombo4_1', shiftClipHipsY(sliceClip(fullL4, 0,  L1, 60), -0.10));
+        binder.clips.set('LightCombo4_2', shiftClipHipsY(sliceClip(fullL4, L1, L2, 60),  0.05));
+        binder.clips.set('LightCombo4_3', shiftClipHipsY(sliceClip(fullL4, L2, L3, 60),  0.55));
+        binder.clips.set('LightCombo4_4', shiftClipHipsY(sliceClip(fullL4, L3, L4, 60),  1.23));
+      }
+
+      if (name === 'LightCombo') {
+        const C1 = 90, C2 = 90 + 92, C3 = 90 + 92 + 118;   // 每段都切到「招式挥完(95% 扫角)」之后
+        const fullL = clip;
+        binder.clips.set('LightCombo1', sliceClip(fullL, 0, C1, 60));
+        binder.clips.set('LightCombo2', sliceClip(fullL, C1, C2, 60));
+        binder.clips.set('LightCombo3', sliceClip(fullL, C2, C3, 60));
+      }
+
+      if (name === 'HeavyCombo') {
+        const CUT1 = Math.round(0.50 * 60);   // 第 1 段 0.00–0.50s
+        const CUT2 = Math.round(1.05 * 60);   // 第 2 段 0.50–1.05s
+        const CUT3 = Math.round(1.70 * 60);   // 第 3 段 1.05–1.70s
+        const full = clip;
+        // 三段各自校准髋高：源动作髋高与本角色身高不匹配，逐段修到脚贴地
+        binder.clips.set('HeavyCombo1', shiftClipHipsY(sliceClip(full, 0, CUT1, 60), -0.13));
+        binder.clips.set('HeavyCombo2', shiftClipHipsY(sliceClip(full, CUT1, CUT2, 60), -0.12));
+        binder.clips.set('HeavyCombo3', shiftClipHipsY(sliceClip(full, CUT2, CUT3, 60), 0.08));
       }
 
 
@@ -869,6 +914,7 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   binder.root.getWorldScale(ws);
   const sf = ws.y > 1e-4 ? ws.y : 1;
   const targetBoneSpace = (opts.length ?? 1.0) / sf;
+  const bladeLen = targetBoneSpace;   // 归一化后的刃长（本地单位），剑轨采样用
   const k = targetBoneSpace / longest;
 
   // 只沿长轴缩放：等比放大会让剑「又长又宽」，
@@ -971,6 +1017,7 @@ export async function attachWeaponModel(binder, url, opts = {}) {
 
   // 暴露给调参面板 / 控制台：改完角度后调 realign()，柄会重新钉回掌心
   outer.userData.weapon = { realign, rollGroup, target, setGripShift, getGripShift: () => gripShift };
+  outer.userData.weaponLength = bladeLen;   // 刃长（本地单位），剑轨采样用
   if (binder) binder.weaponGroup = outer;
 
   return outer;

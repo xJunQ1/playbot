@@ -13,6 +13,20 @@
 //  调参：VFX_CFG 已挂到 lil-gui「近战特效」文件夹
 // ─────────────────────────────────────────────────────────────
 import * as THREE from 'three';
+import { BladeTrail } from './blade-trail.js';
+import { guardFromAO } from './ao-guard.js';
+
+// free_slash_vfx 的月牙刀光贴图（作为剑轨遮罩）
+let _slashMap = null;
+function slashMap() {
+  if (_slashMap !== null) return _slashMap || null;
+  if (typeof document === 'undefined') return (_slashMap = false);
+  _slashMap = new THREE.TextureLoader().load('assets/vfx/Slash_Noise_Slash_Noise.png');
+  _slashMap.colorSpace = THREE.SRGBColorSpace;
+  _slashMap.wrapS = THREE.ClampToEdgeWrapping;
+  _slashMap.wrapT = THREE.ClampToEdgeWrapping;
+  return _slashMap;
+}
 
 export const VFX_CFG = {
   enabled: true,
@@ -22,6 +36,22 @@ export const VFX_CFG = {
   telegraph: true,         // Boss 起手预警（起手帧手部红光）
   telegraphBossOnly: true, // 只给 Boss 挂；关掉的话玩家出招也会有
   telegraphStart: 0.35,    // 起手第一帧就有的亮度（0 = 从全黑慢慢亮）
+
+  // ── 真实剑轨（跟刃采样）──────────────────────────────
+  arc: false,              // 旧的固定弧光（已被真实剑轨取代，留着可对比）
+  trail: true,             // 剑轨总开关
+  trailLife: 0.26,         // 采样存活秒数：越长拖尾越长
+  trailIntensity: 1.55,    // 亮度倍率
+  trailBoss: true,         // Boss 也铺
+
+  // 玩家剑轨配色：取自 free_slash_vfx 的 "Slash World Var 2" 材质
+  //   _Color  r0.04 g0.00 b0.47（深紫） / 高光 r0.24 g0.00 b1.00（紫罗兰）
+  trailMap: true,          // 用 free_slash_vfx 的月牙贴图（关掉=纯色光带）
+  trailMapTile: 1.9,       // 贴图沿时间方向平铺次数（越大月牙越密）
+  trailShift: -0.1,         // 光带沿刃身微调（负值 = 往护手方向收；-0.1 = 略收回，贴合剑身内侧）
+  trailPurple: true,       // 用 Unity 包里的紫色配色（关掉=纯白）
+  trailCore: '#9d5bff',    // 刃尖核心色（亮紫）
+  trailEdge: '#3a08b8',    // 刃根边缘色（深紫）
 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -176,9 +206,39 @@ export class MeleeVFX {
     this.scene = scene;
     this.getCamera = opts.getCamera ?? (() => null);
     this.effects = [];
+    // 真实剑轨：玩家 / Boss 各一条，按「刃根→刃尖」逐帧采样
+    this.trails = {
+      player: new BladeTrail(scene, { life: VFX_CFG.trailLife, maxSamples: 72 }),
+      boss: new BladeTrail(scene, { life: VFX_CFG.trailLife, maxSamples: 72 }),
+    };
+    this.trails.boss.setColors(0xfff4e2, 0xffb066);
   }
 
   get activeCount() { return this.effects.length; }
+
+  /**
+   * 每帧喂一次剑轨。
+   * @param key 'player' | 'boss'
+   * @param base 刃根世界坐标
+   * @param tip  刃尖世界坐标
+   * @param dt   秒
+   * @param swinging 是否正在挥剑；false 时只让旧轨迹自然消退
+   */
+  feedTrail(key, base, tip, dt, swinging = true) {
+    const trail = this.trails && this.trails[key];
+    if (!trail) return;
+    if (!VFX_CFG.enabled || !VFX_CFG.trail) { trail.clear(); return; }
+    if (key === 'boss' && !VFX_CFG.trailBoss) { trail.release(dt); return; }
+    trail.life = Math.max(0.05, VFX_CFG.trailLife);
+    trail.setMap(VFX_CFG.trailMap ? slashMap() : null, VFX_CFG.trailMapTile || 1);
+    if (key === 'player') {
+      if (VFX_CFG.trailPurple) trail.setColors(VFX_CFG.trailCore || '#9d5bff', VFX_CFG.trailEdge || '#3a08b8');
+      else trail.setColors('#ffffff', '#dfefff');
+    }
+    trail.material.uniforms.uIntensity.value = clamp(VFX_CFG.intensity * VFX_CFG.trailIntensity, 0, 4);
+    if (swinging && base && tip) trail.push(base, tip, dt);
+    else trail.release(dt);
+  }
 
   // ── 刀光 ───────────────────────────────────────────────────
   /**
@@ -186,6 +246,7 @@ export class MeleeVFX {
    * @param move  MOVES 里的一条招式（需要 hitbox / active / swing）
    */
   swingFromActor(actor, move) {
+    if (!VFX_CFG.arc) return null;
     if (!VFX_CFG.enabled || !actor || !move || !move.hitbox || move.active <= 0) return null;
 
     const scale = actor.scale ?? 1;
@@ -207,7 +268,7 @@ export class MeleeVFX {
     const geo = makeArcGeometry(shape, radius, { angle, inner, tilt, reverse: isBoss });
     const mat = makeArcMaterial(colorA, colorB);
 
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = guardFromAO(new THREE.Mesh(geo, mat), mat);
     mesh.position.copy(actor.pos);
     mesh.position.y += yBase;
     mesh.rotation.y = actor.yaw;
@@ -344,7 +405,7 @@ export class MeleeVFX {
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
-      const sp = new THREE.Sprite(mat);
+      const sp = guardFromAO(new THREE.Sprite(mat), mat);
       sp.position.copy(base);
       sp.scale.setScalar(L.size);
       sp.renderOrder = 6;
@@ -363,7 +424,7 @@ export class MeleeVFX {
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
-      const sp = new THREE.Sprite(mat);
+      const sp = guardFromAO(new THREE.Sprite(mat), mat);
       sp.scale.setScalar(rand(0.04, 0.085));
       sp.position.copy(base).add(new THREE.Vector3(
         rand(-0.08, 0.08), rand(-0.06, 0.05), rand(-0.08, 0.08),
@@ -533,7 +594,7 @@ export class MeleeVFX {
       sizeAttenuation: true,
     });
 
-    const pts = new THREE.Points(geo, mat);
+    const pts = guardFromAO(new THREE.Points(geo, mat), mat);
     pts.frustumCulled = false;
     pts.renderOrder = 4;
     this.scene.add(pts);
@@ -610,7 +671,7 @@ export class MeleeVFX {
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = guardFromAO(new THREE.Mesh(geo, mat), mat);
     mesh.position.copy(point);
     mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
     mesh.frustumCulled = false;

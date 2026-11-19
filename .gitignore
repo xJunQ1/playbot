@@ -42,3 +42,6 @@ assets/player/_*.glb
 assets/player/Blocking_test.glb
 assets/Walking_Backwards_1_narrow*.glb
 assets/Walking_Backwards_1_shortstride.glb
+
+# 调参存档（本地状态，不入库）
+data/tuning.json

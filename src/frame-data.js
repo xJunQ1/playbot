@@ -52,56 +52,59 @@ export const MOVES = {
   //   p_light2  Sword_Slash             strike@35/90  → 截到 55，压成 52 帧
   //   p_heavy   Great_Sword_Slash       strike@43/211 → 截到 77，放成 80 帧
   p_light1: {
-    label: '轻击 1（横劈）',
-    swing: 'horizontal',
-    startup: 32, active: 6, recovery: 14, cancelFrom: 3,
-    damage: 90, poise: 16, hitstun: 16, stamina: 12,
-    motion: [[0, 0], [32, 0.10], [40, 0.42], [52, 0.42]],
+    // 轻击四段连招·第 1 段（0.00–0.62s，实测出刀 0.26s）
+    label: '轻击 1（连招·第一段）', swing: 'horizontal',
+    startup: 16, active: 6, recovery: 15, cancelFrom: 0,
+    damage: 80, poise: 14, hitstun: 14, stamina: 9,
+    motion: [[0, 0], [16, 0.08], [24, 0.34], [37, 0.34]],
     hitbox: { offset: 0.95, radius: 0.72, yMin: 0.30, yMax: 1.85 },
   },
   p_light2: {
-    // 二段：旋身斩。Hips 在整段里累计转 407°（实测），身体会转一整圈。
-    // 判定不能用「前方扇形」—— 视觉上剑在绕圈，判定框却钉在角色正前方，
-    // 打到背后的人看着像穿模。这里改成以角色为中心的环绕判定。
-    label: '轻击 2（旋身斩）',
-    swing: 'horizontal',
-    startup: 32, active: 10, recovery: 10, cancelFrom: 3,   // 总 52 帧，和轻击 1 同帧数（起手 32 + 判定 10 + 收招 10）
-    damage: 110, poise: 22, hitstun: 18, stamina: 14,
-    motion: [[0, 0], [32, 0.10], [44, 0.40], [52, 0.40]],
-    hitbox: { offset: 0.0, radius: 1.45, yMin: 0.25, yMax: 2.00 },
+    // 第 2 段（0.62–1.34s，段内出刀 0.12s —— 承接上一刀的惯性，起手很短）
+    label: '轻击 2（连招·第二段）', swing: 'horizontal',
+    startup: 7, active: 6, recovery: 30, cancelFrom: 0,
+    damage: 90, poise: 16, hitstun: 16, stamina: 10,
+    motion: [[0, 0], [7, 0.05], [16, 0.30], [43, 0.30]],
+    hitbox: { offset: 1.00, radius: 0.78, yMin: 0.28, yMax: 1.90 },
   },
   p_light3: {
-    // 终结：剑盾斩。收招最长，代价是耐力翻倍
-    label: '轻击 3（剑盾斩）',
-    swing: 'horizontal',
-    startup: 35, active: 16, recovery: 19, cancelFrom: 8,
-    damage: 150, poise: 30, hitstun: 22, stamina: 18,
-    motion: [[0, 0], [35, 0.18], [48, 0.85], [70, 0.85]],
+    // 第 3 段（1.34–1.94s，段内出刀 0.24s）
+    label: '轻击 3（连招·第三段）', swing: 'horizontal',
+    startup: 15, active: 6, recovery: 15, cancelFrom: 0,
+    damage: 110, poise: 20, hitstun: 18, stamina: 12,
+    motion: [[0, 0], [15, 0.08], [24, 0.36], [36, 0.36]],
     hitbox: { offset: 1.05, radius: 0.85, yMin: 0.25, yMax: 1.95 },
   },
+  p_light4: {
+    // 终结（1.94–2.60s，段内出刀 0.48s，收招最长）
+    label: '轻击 4（连招·终结）', swing: 'thrust',
+    startup: 26, active: 8, recovery: 6, cancelFrom: 6,
+    damage: 160, poise: 30, hitstun: 24, stamina: 16,
+    motion: [[0, 0], [26, 0.10], [34, 0.95], [40, 0.95]],
+    hitbox: { offset: 1.15, radius: 0.90, yMin: 0.22, yMax: 2.05 },
+  },
   p_heavy: {
-    label: '重击', swing: 'vertical',
-    startup: 41, active: 15, recovery: 24, cancelFrom: 14,
-    damage: 260, poise: 55, hitstun: 34, stamina: 30,
-    motion: [[0, 0], [41, 0.12], [52, 0.62], [80, 0.62]],
+    // 重击三连击·第 1 段（0.00–0.50s，实测出刀 0.26s）
+    label: '重击 1（连击·第一段）', swing: 'vertical',
+    startup: 15, active: 7, recovery: 8, cancelFrom: 0,   // 段长只有 30 帧，连段窗口必须紧贴判定结束
+    damage: 260, poise: 55, hitstun: 34, stamina: 26,
+    motion: [[0, 0], [15, 0.10], [22, 0.55], [30, 0.55]],
     hitbox: { offset: 1.25, radius: 0.95, yMin: 0.20, yMax: 2.10 },
   },
   p_heavy2: {
-    // 二段：剑盾横扫，横向大范围，和大剑的竖劈形成十字
-    label: '重击 2（剑盾横扫）',
-    swing: 'horizontal',
-    startup: 36, active: 17, recovery: 32, cancelFrom: 12,
-    damage: 300, poise: 60, hitstun: 34, stamina: 26,
-    motion: [[0, 0], [36, 0.15], [50, 1.00], [85, 1.00]],
+    // 重击三连击·第 2 段（0.50–1.05s，实测出刀 0.74s → 段内 0.24s）
+    label: '重击 2（连击·第二段）', swing: 'horizontal',
+    startup: 14, active: 8, recovery: 11, cancelFrom: 0,
+    damage: 300, poise: 60, hitstun: 34, stamina: 24,
+    motion: [[0, 0], [14, 0.12], [22, 0.70], [33, 0.70]],
     hitbox: { offset: 1.30, radius: 1.00, yMin: 0.20, yMax: 2.15 },
   },
   p_heavy3: {
-    // 终结：突进冲撞。位移最大（4.6m），收招最长 —— 打空会被狠狠惩罚
-    label: '重击 3（突进冲撞）',
-    swing: 'thrust',
-    startup: 30, active: 12, recovery: 26, cancelFrom: 12,
-    damage: 380, poise: 80, hitstun: 40, stamina: 34,
-    motion: [[0, 0], [24, 0.0], [34, 3.20], [42, 4.60], [68, 4.60]],
+    // 重击三连击·第 3 段（1.05–1.70s，实测出刀 1.22s → 段内 0.17s，后面带 1.58s 的收势）
+    label: '重击 3（连击·终结）', swing: 'thrust',
+    startup: 10, active: 10, recovery: 19, cancelFrom: 8,
+    damage: 380, poise: 80, hitstun: 40, stamina: 30,
+    motion: [[0, 0], [10, 0.05], [18, 0.85], [26, 1.20], [39, 1.20]],
     hitbox: { offset: 1.20, radius: 0.95, yMin: 0.20, yMax: 2.10 },
   },
 
