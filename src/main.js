@@ -442,6 +442,38 @@ function resolveHit(attacker, defender, hb) {
   applyDamage(attacker, defender, attacker.move);
 }
 
+// ── Boss 霸体 ────────────────────────────────────────────────
+// 3 秒内被打出超过 5 次僵直 → 强制解除僵直、回到正常状态，并给 3 秒霸体。
+// 霸体期间：无视受击僵直、可以继续攻击，但血量照扣。
+const BOSS_ARMOR = { windowFrames: 180, maxStuns: 5, durationFrames: 180 };
+
+/** 记一次僵直；返回 true 表示这次应该免疫（已经霸体 / 刚触发霸体） */
+function registerBossStun() {
+  if (!boss.stunMarks) boss.stunMarks = [];
+  if (boss.armorUntil === undefined) boss.armorUntil = -1;
+
+  if (logicFrame < boss.armorUntil) return true;
+
+  boss.stunMarks = boss.stunMarks.filter((f) => logicFrame - f <= BOSS_ARMOR.windowFrames);
+  boss.stunMarks.push(logicFrame);
+
+  if (boss.stunMarks.length > BOSS_ARMOR.maxStuns) {
+    boss.stunMarks.length = 0;
+    boss.armorUntil = logicFrame + BOSS_ARMOR.durationFrames;
+    boss.setState('idle');
+    boss.stunTimer = 0;
+    banner('霸体', 800);
+    console.log('[boss] 3 秒内僵直 > 5 次 → 霸体 3 秒（logicFrame', logicFrame, '）');
+    return true;
+  }
+  return false;
+}
+
+/** 霸体是否生效中 */
+function bossArmored() {
+  return logicFrame < (boss.armorUntil ?? -1);
+}
+
 function applyDamage(attacker, defender, move) {
   // 玩家格挡 / 弹反窗口
   if (defender === player && player.state === 'block') {
@@ -449,8 +481,10 @@ function applyDamage(attacker, defender, move) {
     if (player.frame <= parryEnd) {
       // 弹反成功
       boss.poise = Math.max(0, boss.poise - 60);
-      boss.setState('hitstun');
-      boss.stunTimer = 90;
+      if (!registerBossStun()) {   // 霸体时弹反也不吃僵直
+        boss.setState('hitstun');
+        boss.stunTimer = 90;
+      }
       player.iframe = 20;
       shake(0.14);
       hitstop(HITSTOP_HEAVY());
@@ -478,13 +512,17 @@ function applyDamage(attacker, defender, move) {
   const dmg = move.damage;
   defender.hp = Math.max(0, defender.hp - dmg);
   defender.poise = Math.max(0, defender.poise - move.poise);
-  defender.setState('hitstun');
-  defender.stunTimer = move.hitstun;
+  // Boss 有霸体判定：掉血照常，僵直可能被免疫
+  const bossImmune = defender === boss ? registerBossStun() : false;
+  if (!bossImmune) {
+    defender.setState('hitstun');
+    defender.stunTimer = move.hitstun;
+  }
   defender.flashTimer = 4;
 
   // 削韧满：强制长硬直
   if (defender.poise <= 0 && defender === boss) {
-    defender.stunTimer = 110;
+    if (!bossImmune) defender.stunTimer = 110;   // 霸体期间连削韧硬直也免疫
     defender.poise = defender.maxPoise;
   }
 
@@ -1234,13 +1272,57 @@ function updateGuardViz(a) {
 // 起伏传不到刀上，所以不会上下颠；只跟 Boss 的水平位置和朝向走。
 // 攻击 / 受击 / 死亡时把刀交回右手，恢复原来的局部变换。
 // ═══════════════════════════════════════════════════════════════
+/**
+ * 缩短手臂：只缩放上臂 / 前臂这两级骨骼。
+ * 子骨骼（手、手指、扭转骨）会跟着等比缩小，整条手臂一致变短，不会脱节。
+ * 动作包里的 scale 轨道已被 stripBoneTransforms 去掉，这里的值不会被覆盖。
+ */
+/**
+ * 把武器缩放到指定世界长度（沿它最长的那个轴）。
+ * 每次换模型/换骨架，骨骼尺度都可能变，武器挂上去就会过大或过小 —— 挂完量一次再纠正。
+ */
+function fitWeaponLength(actor, meters) {
+  const w = actor?.weapon;
+  if (!w || !(meters > 0)) return 0;
+  // 量之前必须从父级往下把世界矩阵刷一遍：只对 w 自己 updateMatrixWorld 会读到父级旧矩阵，
+  // 量出来差一两个数量级，再按这个差值缩放就把武器放大成几十米。
+  const from = w.parent ?? w;
+  if (from.updateWorldMatrix) from.updateWorldMatrix(true, true);
+  for (let pass = 0; pass < 3; pass++) {
+    const box = new THREE.Box3().setFromObject(w);
+    const size = box.getSize(new THREE.Vector3());
+    const cur = Math.max(size.x, size.y, size.z);
+    if (!Number.isFinite(cur) || cur < 1e-4) return 0;
+    const ratio = meters / cur;
+    if (Math.abs(ratio - 1) < 0.02) return +cur.toFixed(2);   // 返回「实测」长度，日志才不会说谎
+    w.scale.multiplyScalar(ratio);
+    w.updateMatrixWorld(true);
+  }
+  const box = new THREE.Box3().setFromObject(w);
+  const size = box.getSize(new THREE.Vector3());
+  return +Math.max(size.x, size.y, size.z).toFixed(2);
+}
+
+function setArmLength(actor, factor) {
+  if (!actor?.binder || !(factor > 0.1)) return 0;
+  let n = 0;
+  actor.binder.root.traverse((o) => {
+    if (!o.isBone) return;
+    if (!/^(L|R)_(Upperarm|Forearm)$/i.test(o.name)) return;
+    o.scale.setScalar(factor);
+    n++;
+  });
+  return n;
+}
 const DRAG = {
   enabled: true,
-  back: 0.02,     // 握把相对右手再往后挪多少（米）
-  height: 0,      // 握把离地高度；0 = 按 Boss 身高自动（0.48H）
-  tipLen: 0,      // 刀刃落点距离；0 = 按身高自动（1.02H）
-  elev: 0.45,     // 刀杆俯角（弧度）：刀尖正好落在地面
-  roll: 0,        // 绕刀杆自转：调刀刃朝上 / 朝地
+  back: 0.02,     // （旧逻辑用，现已不生效：握把直接跟手骨）
+  height: 0,      // （旧逻辑用，现已不生效：握把高度由手的位置决定）
+  tipLen: 0,      // 刀刃落点距离；0 = 按身高自动（1.02H），只影响地面划痕位置
+  ground: true,   // 拖地模式：俯角按「握把离地高度」反算，刀尖永远正好落在 y = 0
+  side: 0.30,     // 刀杆侧偏角（弧度）：绕竖轴把刀甩到斜后方，刀尖朝外；负值换边
+  elev: 0.15,     // 只在 ground=false 时生效：固定俯角
+  roll: 0,        // 绕刀杆自转：调刀刃朝上 / 朝地（刀身摊平用 ±1.57）
 };
 
 let dragState = null;
@@ -1248,7 +1330,12 @@ const _dragDir = new THREE.Vector3();
 const _dragAxisY = new THREE.Vector3(0, 1, 0);
 const _dragQuat = new THREE.Quaternion();
 const _dragRoll = new THREE.Quaternion();
+const _dragHandQuat = new THREE.Quaternion();
+const _dragLocalQuat = new THREE.Quaternion();
 const _dragHandPos = new THREE.Vector3();
+const _dragRefX = new THREE.Vector3();
+const _dragRefZ = new THREE.Vector3();
+const _dragBasis = new THREE.Matrix4();
 
 function setupDragWeapon() {
   const w = boss.weapon;
@@ -1265,20 +1352,50 @@ function setupDragWeapon() {
   num('dtip', 'tipLen');
   num('delev', 'elev');
   num('droll', 'roll');
+  num('dside', 'side');
+  if (q.get('dground') != null) DRAG.ground = q.get('dground') !== '0';
 
   // 用「模型实际身高」当拖刀尺度的基准（boss.hurt.height 是战斗数值，和模型不一定一致）
+  //
+  // ★ 必须按骨骼量，不能按几何包围盒的 Y 轴：
+  //   Tripo 导出的网格是 Z-up，身高在 Z 轴上，Y 只有 0.47 的「厚度」，
+  //   量出来只有 5mm，于是握把被钉在地面、整把镰刀插到地板底下 ——
+  //   表现就是「待机时武器消失，只有攻击（武器交回手上）才出现」。
   let modelH = 1.9;
   try {
-    const ws = new THREE.Vector3();
-    boss.binder.root.getWorldScale(ws);
-    let localH = 0;
-    boss.binder.root.traverse((o) => {
-      if (!o.isSkinnedMesh || !o.geometry) return;
-      o.geometry.computeBoundingBox();
-      const h = o.geometry.boundingBox.max.y - o.geometry.boundingBox.min.y;
-      if (h > localH) localH = h;
+    const root = boss.binder.root;
+    root.updateMatrixWorld(true);
+    let head = null;
+    let toe = null;
+    root.traverse((o) => {
+      if (!o.isBone) return;
+      if (!head && /^head$/i.test(o.name)) head = o;
+      if (!toe && /toebase$/i.test(o.name)) toe = o;
     });
-    if (localH > 1e-3) modelH = localH * ws.y;
+    const v = new THREE.Vector3();
+    let fromBones = false;
+    if (head && toe) {
+      head.getWorldPosition(v); const hy = v.y;
+      toe.getWorldPosition(v); const ty = v.y;
+      // 头骨 → 脚趾骨大约占身高 85%，和 fitToHeightBones 用的是同一个基准
+      const boneH = Math.abs(hy - ty);
+      if (boneH > 1e-3) { modelH = boneH / 0.85; fromBones = true; }
+    }
+    // 兜底：拿不到骨骼时退回几何包围盒，但取「最长轴」而不是 Y，并对量级做合理性夹取
+    if (!fromBones) {
+      const ws = new THREE.Vector3();
+      root.getWorldScale(ws);
+      let localH = 0;
+      root.traverse((o) => {
+        if (!o.isSkinnedMesh || !o.geometry) return;
+        o.geometry.computeBoundingBox();
+        const b = o.geometry.boundingBox;
+        const h = Math.max(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z);
+        if (h > localH) localH = h;
+      });
+      const guess = localH * ws.y;
+      modelH = (guess > 0.5 && guess < 10) ? guess : (boss.hurt?.height ?? 1.95);
+    }
   } catch (e) { /* 灰盒模式下没有 binder，用默认值 */ }
 
   dragState = {
@@ -1289,6 +1406,8 @@ function setupDragWeapon() {
     scale: w.scale.clone(),
     heightRef: modelH,
     onHand: true,
+    yaw0: 0,                        // 进入拖刀时的 yaw
+    z0: new THREE.Vector3(0, 0, 1), // 进入拖刀时锁定的「刀身滚转参考轴」
   };
 }
 
@@ -1299,50 +1418,100 @@ function updateDragWeapon() {
   // Boss 只有 idle（含踱步/绕圈）和 move 算「非战斗」
   const wantDrag = DRAG.enabled && (boss.state === 'idle' || boss.state === 'move');
 
-  if (wantDrag && d.onHand) {
-    scene.attach(d.obj);          // 保留世界变换，脱离手骨
-    d.onHand = false;
-  } else if (!wantDrag && !d.onHand) {
-    d.hand.add(d.obj);            // 交回右手
-    d.obj.scale.copy(d.scale);
-    // 按调参面板的当前角度重新钉一次 —— 别把刚调好的武器朝向冲掉
-    if (typeof applyBossWeapon === 'function') applyBossWeapon();
-    d.onHand = true;
+  if (!wantDrag) {
+    // 切回战斗：恢复调参面板上的握持姿态
+    if (d.dragging) {
+      d.dragging = false;
+      d.obj.position.copy(d.pos);
+      d.obj.quaternion.copy(d.quat);
+      d.obj.scale.copy(d.scale);
+      if (typeof applyBossWeapon === 'function') applyBossWeapon();
+      d.pos.copy(d.obj.position);
+      d.quat.copy(d.obj.quaternion);
+      d.scale.copy(d.obj.scale);
+    }
+    return;
   }
 
-  if (d.onHand) return;
+  const entering = !d.dragging;
+  if (entering) {
+    d.dragging = true;
+    d.pos.copy(d.obj.position);      // 记下进入拖刀前的握持姿态
+    d.quat.copy(d.obj.quaternion);
+    d.scale.copy(d.obj.scale);
+  }
 
-  // 刀杆方向：从握把指向刀头，朝身后 + 朝下
+  // ★ 关键：武器始终是手骨的子节点，不摘下来 —— boss 是「抓着手柄拖」，
+  //   握把位置就是 realign() 算好的掌心位置，跟着手一起动，不会再错位。
+  //   这里只改它相对手骨的旋转，让刀身朝斜后方横着甩出去。
+  d.obj.position.copy(d.pos);
+  d.obj.scale.copy(d.scale);
+
+  // 握把世界坐标（= 手骨世界矩阵 × 握把局部位置）
+  d.hand.updateWorldMatrix(true, false);
+  _dragHandPos.copy(d.pos).applyMatrix4(d.hand.matrixWorld);
+
+  // 握把 → 刀尖的实际长度
+  const L = DRAG.tipLen > 0 ? DRAG.tipLen : (d.heightRef || 1.9) * 1.02;
+
+  // 水平方向：正后方（yaw + π）绕竖轴偏 DRAG.side
   const yaw = boss.yaw;
-  const fx = Math.sin(yaw), fz = Math.cos(yaw);
-  const ce = Math.cos(DRAG.elev), se = Math.sin(DRAG.elev);
-  _dragDir.set(-fx * ce, -se, -fz * ce).normalize();
+  const az = yaw + Math.PI + DRAG.side;
+  const hx = Math.sin(az), hz = Math.cos(az);
 
-  // 模型局部 +Y 就是「握把 → 刀头」，转过去即可
-  _dragQuat.setFromUnitVectors(_dragAxisY, _dragDir);
+  if (DRAG.ground) {
+    // ★ 拖地：俯角不写死，按「握把离地多高」反算 —— 刀尖的水平投影 flat 满足
+    //   flat² + drop² = L²，于是刀尖永远正好落在 y = 0：手抬高、放低都不会悬空或插进地里。
+    const drop = Math.min(Math.max(_dragHandPos.y, 0.05), L * 0.92);
+    const flat = Math.sqrt(Math.max(0.01, L * L - drop * drop));
+    _dragDir.set(hx * flat / L, -drop / L, hz * flat / L).normalize();
+  } else {
+    const ce = Math.cos(DRAG.elev), se = Math.sin(DRAG.elev);
+    _dragDir.set(hx * ce, -se, hz * ce).normalize();
+  }
+
+  // 进入拖刀的第一帧：用最短弧定一次「刀身滚转」，并把它锁下来。
+  //
+  // ★ 不能每帧都用 setFromUnitVectors：它只保证 +Y 指向刀杆方向，滚转是最短弧的副产物。
+  //   主角左右移动时 Boss 会转身追人 → yaw 连续变化 → 最短弧的滚转角跟着乱拧，
+  //   看起来就是「刀绕着刀柄自转」。锁住之后每帧只做绕 Y 的刚性旋转。
+  if (entering) {
+    _dragQuat.setFromUnitVectors(_dragAxisY, _dragDir);
+    d.yaw0 = yaw;
+    _dragRefZ.set(0, 0, 1).applyQuaternion(_dragQuat);
+    d.z0.copy(_dragRefZ);
+  }
+
+  // 锁定参考随身体绕 Y 转过 Δyaw，再投影到「垂直于当前刀杆」的平面上
+  _dragRefZ.copy(d.z0).applyAxisAngle(_dragAxisY, yaw - d.yaw0);
+  _dragRefZ.addScaledVector(_dragDir, -_dragRefZ.dot(_dragDir));
+  if (_dragRefZ.lengthSq() < 1e-8) _dragRefZ.set(0, 0, 1);      // 刀杆与参考轴重合时的退化
+  _dragRefZ.normalize();
+  _dragRefX.crossVectors(_dragDir, _dragRefZ).normalize();
+  _dragRefZ.crossVectors(_dragRefX, _dragDir).normalize();      // 再正交化，避免浮点漂移
+  _dragBasis.makeBasis(_dragRefX, _dragDir, _dragRefZ);
+  _dragQuat.setFromRotationMatrix(_dragBasis);
+
   if (DRAG.roll) {
     _dragRoll.setFromAxisAngle(_dragDir, DRAG.roll);
-    _dragQuat.premultiply(_dragRoll);
+    _dragQuat.premultiply(_dragRoll);      // 绕刀杆自转
   }
 
-  // 握把钉在右手正下方：只跟手的水平位置，高度写死 —— 所以不会上下颠
-  d.hand.updateWorldMatrix(true, false);
-  _dragHandPos.setFromMatrixPosition(d.hand.matrixWorld);
-  // 高度和刀刃落点按 Boss 身高算：换模型 / 改体型都不用重调
-  const H = d.heightRef || 1.9;
-  const gripY = DRAG.height > 0 ? DRAG.height : H * 0.48;
-  d.obj.position.set(
-    _dragHandPos.x - fx * DRAG.back,
-    gripY,
-    _dragHandPos.z - fz * DRAG.back,
-  );
-  d.obj.quaternion.copy(_dragQuat);
+  // 世界朝向 → 手骨局部朝向
+  d.hand.getWorldQuaternion(_dragHandQuat);
+  _dragLocalQuat.copy(_dragHandQuat).invert().multiply(_dragQuat);
+  d.obj.quaternion.copy(_dragLocalQuat);
 
-  // 刀刃落点贴地 → 在地面留一道划痕（只在拖刀状态产生）
-  const tipLen = DRAG.tipLen > 0 ? DRAG.tipLen : (d.heightRef || 1.9) * 1.02;
+  // 换了朝向后，握把会绕武器原点画弧、离开掌心 ——
+  // 用 realign() 重新量一次「手柄末端那一圈」的几何中心，把它重新钉回掌心。
+  // 这样看上去就是手始终抓着刀柄在拖，武器只是绕握点转了个方向。
+  const wApi = d.obj.userData && d.obj.userData.weapon;
+  if (wApi && typeof wApi.realign === 'function') wApi.realign();
+
+  // 刀刃落点 → 地面划痕（拖地模式下正好落在 y = 0 的地面点）
   scratch.emit(
-    d.obj.position.x + _dragDir.x * tipLen,
-    d.obj.position.z + _dragDir.z * tipLen,
+    _dragHandPos.x + _dragDir.x * L,
+    _dragHandPos.z + _dragDir.z * L,
   );
 }
 // ── 渲染 ──────────────────────────────────────────────────────
@@ -1677,6 +1846,8 @@ function resetFight() {
   hitstopFrames = 0;
   shakeAmt = 0;
   vfx.clear();
+  boss.stunMarks = [];
+  boss.armorUntil = -1;
   scratch.clear();
   player.footIK.reset(player);
   boss.footIK.reset(boss);
@@ -1695,18 +1866,21 @@ function resetFight() {
   // 默认就加载完整美术资源：模型 + 武器 + 动捕包。
   // 想回到纯灰盒（零依赖、秒开）加 ?graybox=1。
   const graybox = q.get('graybox') != null;
-  // 玩家用 main 新增的 player 动画模型；Boss 保留 zzh 的 boss3
+  // 玩家用 main 新增的 player 动画模型；Boss 用本地最新的 boss_model
   const pUrl = graybox ? null : (q.get('p') ?? 'assets/player/player.glb');
-  const bUrl = graybox ? null : (q.get('b') ?? 'assets/boss3.glb');
+  // Boss 换成 boss(1).zip 里那套 FBX 转出来的模型（顶点已按旧模型校正到同一尺度）；
+  // 旧的 182MB boss_model.glb 保留着，想对比用 ?b=assets/boss_model.glb
+  const bUrl = graybox ? null : (q.get('b') ?? 'assets/boss_model_v2.glb');
   const wantWeapon = !graybox && q.get('noweapon') == null;
   const weaponUrl = wantWeapon ? (q.get('wp') ?? 'assets/jian_min.glb') : null;
-  // Boss 单独一把武器：默认换镰刀，?bwp=... 可覆盖，?bwp=none 回到同一把剑
-  const bossWeaponUrl = !wantWeapon ? null : (q.get('bwp') === 'none' ? weaponUrl : (q.get('bwp') ?? 'assets/scythe.glb'));
+  // Boss 单独一把武器：默认巨剑，?bwp=... 可覆盖，?bwp=none 回到和玩家同一把剑
+  // Boss 武器：巨剑（assets/greatsword.glb）。想换回镰刀用 ?bwp=assets/scythe.glb
+  const bossWeaponUrl = !wantWeapon ? null : (q.get('bwp') === 'none' ? weaponUrl : (q.get('bwp') ?? 'assets/greatsword.glb'));
   const wantAnim = !graybox && q.get('anim') !== '0';
   if (!pUrl && !bUrl) return;
 
   try {
-    const { bindModel, loadAnimationPack, loadClipPack, dampenArmSwing } = await import('./asset-adapter.js');
+    const { bindModel, loadAnimationPack, loadClipPack, loadClipJSON, dampenArmSwing } = await import('./asset-adapter.js');
     banner('加载模型…', 1500);
     await Promise.all([
       pUrl ? bindModel(player, pUrl, {
@@ -1731,24 +1905,29 @@ function resetFight() {
       bUrl ? bindModel(boss, bUrl, {
         renderer,
         targetHeight: Number(q.get('bh') ?? 1.95),
-        // Boss 的镰刀：等比缩放（默认开），长轴本来就是 Y，不需要转轴
+        boneFit: true,   // 这套 FBX 模型要按骨骼量身高
+        // Boss 的巨剑：等比缩放（默认开），长轴本来就是 Y，不需要转轴
+        // 原始尺寸 0.98 长 / 0.30 宽，细端（刀柄）在 -Y，等比缩放到 2.00 m
         weaponModel: bossWeaponUrl,
         weaponOpts: bossWeaponUrl ? {
-          length: Number(q.get('bwl') ?? 2.10),
+          length: Number(q.get('bwl') ?? 2.00),
           alignAxis: q.get('bwax') ?? 'y',
           gripEnd: Number(q.get('bwgrip') ?? -1),
-          gripShift: Number(q.get('bwshift') ?? 0.10),
+          gripShift: Number(q.get('bwshift') ?? 0.08),
           palmOffset: Number(q.get('bwpalm') ?? 0.06),
           palmSide: Number(q.get('bwside') ?? -0.05),
           uniform: q.get('bwuni') !== '0',
           roll: Number(q.get('bwroll') ?? 0),
-          // 实测：绕手骨 X ≈ -100°，镰刀柄朝前、刀刃抬到腰高，静止时不拖地
+          // 这组角度是给镰刀调的（绕手骨 X ≈ -100°）。巨剑沿用同一套握持姿态，
+          // 若看着歪了用 ?bwrot= 覆盖，例如 ?bwrot=-1.57,0,-1.57
           rotation: q.get('bwrot') ? q.get('bwrot').split(',').map(Number) : [-100 * Math.PI / 180, 0, -Math.PI / 2],
         } : undefined,
         weapon: (!bossWeaponUrl && wantWeapon) ? { length: Number(q.get('bwl') ?? 2.4) } : null,
         scale: Number(q.get('bs') ?? 1),
-        // 同上：模型正面是 +X，不补这 -90° 就会横着走
-        yawOffset: Number(q.get('by') ?? -Math.PI / 2),
+        // ★ 这套 Boss 模型（FBX→GLB）正面就是 +Z，和玩家那套 Tripo（+X）不一样。
+        //   实测静止姿态：脚→脚趾向量 atan2(x, z) ≈ 1.3°，所以修正量取 0。
+        //   沿用 -90° 会让 Boss 侧身 90° 朝人走，看起来「面朝侧面」。
+        yawOffset: Number(q.get('by') ?? 0),
       }) : null,
     ].filter(Boolean));
 
@@ -1792,18 +1971,37 @@ function resetFight() {
           console.warn('[boss-anim] 自带动作包加载失败，回退 Mixamo:', e);
         }
 
+        // boss动作/ 里的 5 段动作（FBX → 轨道 JSON），覆盖同名 clip
+        const jsonClips = [
+          // 新 Boss 是 Mixamo 骨架，这 5 段动作同名，直接播放（raw）
+          ['walk', 'assets/anims/走路.json', false],
+          ['hit', 'assets/anims/受击.json', false],
+          ['block', 'assets/anims/格挡.json', false],
+          // 转身横扫：髋骨有接近 180° 的转体，只有同名骨架能正确播放，raw 模式没问题
+          // 套上去整个身子会翻过来（看起来像横躺）。先不用，b_sweep 回退到 boss_anims 的 slash。
+          ['sweep', 'assets/anims/转身横扫.json', false],
+          ['dead', 'assets/anims/受左横劈死亡.json', false],
+        ];
+        for (const [name, url, slice] of jsonClips) {
+          try {
+            await loadClipJSON(boss.binder, url, { name, slice, raw: true });
+          } catch (e) {
+            console.warn('[boss-anim] JSON 动作加载失败:', name, e);
+          }
+        }
+        console.log('[boss-anim] JSON 动作已覆盖:', jsonClips.map((c) => c[0]).join(','));
+
         if (bossPicked > 0) {
           Object.assign(boss.binder.clipMap, {
-            idle: 'cry',
+            idle: 'Idle',
             walk: 'walk',
             move: 'walk',
             moveback: 'walk',
             blockmove: 'walk',
-            block: 'walk',
-            b_sweep: 'slash',
-            b_slam: 'chop',
-            b_charge: 'slash',
-            b_roar: 'cast',
+            block: 'block',
+            b_sweep: 'sweep',
+            b_slam: 'Great_Sword_Slash',
+            b_charge: 'sweep',
             hitstun: 'hit',
             guardbreak: 'hit',
             dead: 'dead',
@@ -1820,6 +2018,18 @@ function resetFight() {
         console.log('[anim-pack] boss 摆臂压缩轨迹数:', n, 'factor:', armFactor);
       }
       console.log('[anim-pack] clips loaded per actor:', counts);
+    }
+
+    // 武器长度按体型重新标定（换模型后骨骼尺度变了）
+    const wl = Number(q.get('bwl') ?? 2.10);
+    const realWl = fitWeaponLength(boss, wl);
+    if (realWl) console.log('[boss-weapon] 武器长度校准为', realWl, 'm');
+
+    // Boss 手臂略短一点：默认 0.92，?armlen= 可覆盖（1 = 原样）
+    const armLen = Number(q.get('armlen') ?? 0.92);
+    if (armLen > 0.1 && armLen !== 1) {
+      const n = setArmLength(boss, armLen);
+      console.log('[boss-arm] 缩短手臂骨骼:', n, 'factor:', armLen);
     }
 
     setupDragWeapon();
@@ -1845,7 +2055,7 @@ window.__gpuInfo = (() => {
 window.__gpu = window.__gpuInfo.renderer || 'unknown';
 
 window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI };
-window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI, vfx, scratch };
+window.__dbg = { player, boss, CFG, MOVES, camera, scene, AI, vfx, scratch, armor: { registerBossStun, bossArmored } };
 
 // 启动时校验一遍帧数据上限，越界的招式直接打到 console
 const frameIssues = validateAll();

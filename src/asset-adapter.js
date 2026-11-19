@@ -153,6 +153,37 @@ export class ModelBinder {
     if (Number.isFinite(minY)) this.root.position.y -= minY;
   }
 
+  /**
+   * 按「骨骼实际身高」缩放到目标高度（头骨 → 脚趾骨）。
+   * 有些 FBX→GLB 的模型，蒙皮网格几何和骨骼尺度差几百倍，按网格包围盒量会失效。
+   */
+  fitToHeightBones(targetHeight) {
+    this.root.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    let head = null;
+    let toe = null;
+    this.root.traverse((o) => {
+      if (!o.isBone || !o.name) return;
+      if (!head && /^head$/i.test(o.name)) head = o;
+      if (!toe && /toebase$/i.test(o.name)) toe = o;
+    });
+    if (!head || !toe) return false;
+
+    head.getWorldPosition(v); const h0 = v.y;
+    toe.getWorldPosition(v); const t0 = v.y;
+    const boneH = h0 - t0;
+    if (boneH < 1e-4) return false;
+
+    // 头骨到脚趾骨大约占身高的 85%
+    const k = (targetHeight * 0.85) / boneH;
+    this.root.scale.multiplyScalar(k);
+    this.root.updateMatrixWorld(true);
+
+    toe.getWorldPosition(v);
+    this.root.position.y -= v.y;   // 脚趾骨贴地
+    this.root.updateMatrixWorld(true);
+    return true;
+  }
   _getAction(name) {
     if (this.actions.has(name)) return this.actions.get(name);
 
@@ -858,6 +889,80 @@ function findStrikeTime(clip) {
  * 加载「同一个骨架」的自带动作包：不做重定向，只按名字登记。
  * 攻击类走 autoSlice —— 把长动画切到命中点前后，避免被帧表压成 4 倍速。
  */
+/** 目标骨架的局部 rest（第一次调用时抓，之后复用） */
+function getTargetRest(root) {
+  let m = root.userData.__restLocal;
+  if (!m) {
+    m = new Map();
+    root.traverse((o) => { if (o.name) m.set(o.name, o.quaternion.clone()); });
+    root.userData.__restLocal = m;
+  }
+  return m;
+}
+
+/**
+ * 加载「纯轨道 JSON」动作（由 FBX 离线转换而来）。
+ * 轨道是 Mixamo 骨骼名，这里按别名表重定向到 Tripo 骨架：
+ *     target = tRest · (sRest⁻¹ · anim)
+ * JSON 里带了源骨架每根骨骼的 rest 四元数，所以运行时不需要源模型。
+ */
+export async function loadClipJSON(binder, url, opts = {}) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('loadClipJSON ' + res.status + ' ' + url);
+  const data = await res.json();
+
+  const tMap = new Map();
+  binder.root.traverse((o) => { if (o.name) tMap.set(o.name, o); });
+  const rest = getTargetRest(binder.root);
+
+  // raw：目标骨架和动作文件是同一套命名（都是 Mixamo），直接按名字放行，不做重定向
+  const rawMap = opts.raw ? tMap : null;
+
+  const qS = new THREE.Quaternion();
+  const qD = new THREE.Quaternion();
+  const tracks = [];
+
+  for (const tr of data.tracks ?? []) {
+    const dot = tr.n.lastIndexOf('.');
+    if (dot < 0) continue;
+    const bone = tr.n.slice(0, dot);
+    const prop = tr.n.slice(dot + 1);
+
+    const t = rawMap ? rawMap.get(bone) : resolveTargetBone(tMap, bone);
+    if (!t) continue;
+
+    if (prop === 'quaternion' && rawMap) {
+      tracks.push(new THREE.QuaternionKeyframeTrack(t.name + '.quaternion', tr.t, Float32Array.from(tr.v)));
+      continue;
+    }
+
+    if (prop === 'quaternion') {
+      const srcRest = data.rest?.[bone];
+      if (!srcRest) continue;
+      qS.fromArray(srcRest).invert();
+      const qt = rest.get(t.name) ?? t.quaternion;
+      const vals = new Float32Array(tr.v.length);
+      for (let i = 0; i < tr.v.length; i += 4) {
+        qD.fromArray(tr.v, i).premultiply(qS).premultiply(qt).normalize();
+        qD.toArray(vals, i);
+      }
+      tracks.push(new THREE.QuaternionKeyframeTrack(t.name + '.quaternion', tr.t, vals));
+    }
+  }
+
+  let clip = new THREE.AnimationClip(opts.name ?? data.name ?? 'clip', data.duration ?? 1, tracks);
+
+  if (opts.slice === true) {
+    const hit = findStrikeTime(clip);
+    const a = Math.max(0, hit - 0.32);
+    const b = Math.min(clip.duration, hit + 0.52);
+    if (b - a > 0.2) clip = sliceClip(clip, a * 60, b * 60, 60);
+    clip.name = opts.name ?? data.name ?? 'clip';
+  }
+
+  binder.clips.set(clip.name, clip);
+  return clip;
+}
 export async function loadClipPack(binder, url, opts = {}) {
   if (!binder || !binder.loader) return 0;
   const g = await binder.loader.loadAsync(url);
@@ -1076,8 +1181,12 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   const AXIS_IDX = longestAxis === 'x' ? 0 : longestAxis === 'y' ? 1 : 2;
   const longest = size.getComponent(AXIS_IDX) || 1;
 
+  // ★ 缩放基准必须是「武器真正的父级」= 手骨的世界缩放，不是场景根。
+  //   FBX→GLB 的模型常在中间插一层 100× 的 model / armature 节点，
+  //   用 binder.root 量会小 100 倍：武器变成几十上百米，握点（palmOffset/sf）也跟着飞出去几米。
+  hand.updateWorldMatrix(true, false);
   const ws = new THREE.Vector3();
-  binder.root.getWorldScale(ws);
+  hand.getWorldScale(ws);
   const sf = ws.y > 1e-4 ? ws.y : 1;
   const targetBoneSpace = (opts.length ?? 1.0) / sf;
   const k = targetBoneSpace / longest;
@@ -1173,6 +1282,37 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   }
   realign();
 
+  /**
+   * 按「世界尺寸」闭环校正。
+   * 上面那套推导依赖手骨缩放估得准；真机上一旦估偏（父级多一层 100× 节点、
+   * 或者 mixer 还没跑第一帧），武器就会大得离谱。这里直接量世界包围盒迭代收敛，
+   * 最多 3 次、误差 < 2%。
+   */
+  function normalizeWorldLength() {
+    const targetLen = opts.length ?? 1.0;
+    if (!(targetLen > 0)) return 0;
+    let cur = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      outer.updateWorldMatrix(true, true);
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
+      cur = Math.max(size.x, size.y, size.z);
+      if (!Number.isFinite(cur) || cur < 1e-6) return 0;
+      const ratio = targetLen / cur;
+      if (Math.abs(ratio - 1) < 0.02) break;
+      outer.scale.multiplyScalar(ratio);
+      realign();                 // 缩放会带偏握点，重新钉回掌心
+    }
+    return cur;
+  }
+  normalizeWorldLength();
+
+  /** 当前武器的世界长度（米），调参面板/控制台排查用 */
+  function measureWorldLength() {
+    outer.updateWorldMatrix(true, true);
+    const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
+    return +Math.max(size.x, size.y, size.z).toFixed(2);
+  }
+
   /** 沿长轴挪握点：0 = 柄端，1 = 刃端（镰刀/长柄武器常要握在中段） */
   function setGripShift(s) {
     gripShift = Math.min(1, Math.max(0, s));
@@ -1181,7 +1321,10 @@ export async function attachWeaponModel(binder, url, opts = {}) {
   }
 
   // 暴露给调参面板 / 控制台：改完角度后调 realign()，柄会重新钉回掌心
-  outer.userData.weapon = { realign, rollGroup, target, setGripShift, getGripShift: () => gripShift };
+  outer.userData.weapon = {
+    realign, rollGroup, target, setGripShift, getGripShift: () => gripShift,
+    normalizeWorldLength, measureWorldLength,
+  };
   if (binder) binder.weaponGroup = outer;
 
   return outer;
@@ -1199,6 +1342,8 @@ export async function bindModel(actor, url, opts = {}) {
   binder.loader = loader;
   binder.attachTo(actor.mesh.group);
   if (opts.targetHeight) binder.fitToHeight(opts.targetHeight);
+  // FBX→GLB 的模型骨骼尺度可能和网格差很远，再按骨骼校一次（武器挂载之前）
+  if (opts.boneFit) binder.fitToHeightBones(opts.targetHeight);
 
   // 武器是附加物：加载失败不能把整个 bindModel 拖挂 ——
   // 那样 Promise.all 会 reject，window.__dbg 都挂不上，整个 demo 停摆。
