@@ -37,6 +37,13 @@ export function buildStage(scene, opts = {}) {
 const TEXLOW = new URLSearchParams(location.search).get('tex') === 'low';
 const texFloor = T.makeFloorTexture(TEXLOW ? 1024 : 3072, R * 2);
 const texMagic = T.makeMagicTexture(TEXLOW ? 2048 : 4096, R * 2, R / 22);
+// 金线非常细：各向异性过滤开到最大，否则贴着看/斜着看时细线会在 mip 里被抹掉，
+// 表现为「金色花纹时而出现时而消失」
+texMagic.anisotropy = 8;
+texMagic.minFilter = THREE.LinearMipmapLinearFilter;
+texMagic.magFilter = THREE.LinearFilter;
+texMagic.generateMipmaps = true;
+texMagic.needsUpdate = true;
 const texStone = T.makeStoneTexture(TEXLOW ? 256 : 512, [62, 56, 74]);
 const texStoneDark = T.makeStoneTexture(TEXLOW ? 256 : 512, [44, 39, 55]);
 // 用同一张石面贴图当高度图算法线：一步就把「平铺的塑料面」变成有凹凸的石头
@@ -695,10 +702,14 @@ function buildMagic() {
     new THREE.MeshBasicMaterial({
       map: texMagic, transparent: true, blending: THREE.AdditiveBlending,
       depthWrite: false, opacity: MAGIC_OPACITY, toneMapped: false,
+      // 加色线条不吃雾：否则离中心远一点整片法阵会被雾压暗，看着像「花纹时有时无」
+      fog: false,
+      // 和台面共面时会有深度打架，用 polygon offset 顶开
+      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
     })
   );
   plane.rotation.x = -Math.PI / 2;
-  plane.position.y = 0.025;
+  plane.position.y = 0.06;   // 抬高一点，彻底离开台面/贴花所在的深度层
   root.add(plane);
   REFS.magicMat = plane.material;
 
