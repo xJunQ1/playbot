@@ -65,9 +65,9 @@ export const MOVES = {
     // 打到背后的人看着像穿模。这里改成以角色为中心的环绕判定。
     label: '轻击 2（旋身斩）',
     swing: 'horizontal',
-    startup: 49, active: 15, recovery: 16, cancelFrom: 3,
+    startup: 32, active: 10, recovery: 10, cancelFrom: 3,   // 总 52 帧，和轻击 1 同帧数（起手 32 + 判定 10 + 收招 10）
     damage: 110, poise: 22, hitstun: 18, stamina: 14,
-    motion: [[0, 0], [49, 0.10], [60, 0.40], [80, 0.40]],
+    motion: [[0, 0], [32, 0.10], [44, 0.40], [52, 0.40]],
     hitbox: { offset: 0.0, radius: 1.45, yMin: 0.25, yMax: 2.00 },
   },
   p_light3: {
@@ -99,9 +99,9 @@ export const MOVES = {
     // 终结：突进冲撞。位移最大（4.6m），收招最长 —— 打空会被狠狠惩罚
     label: '重击 3（突进冲撞）',
     swing: 'thrust',
-    startup: 18, active: 12, recovery: 30, cancelFrom: 12,
+    startup: 30, active: 12, recovery: 26, cancelFrom: 12,
     damage: 380, poise: 80, hitstun: 40, stamina: 34,
-    motion: [[0, 0], [18, 0.0], [26, 3.20], [34, 4.60], [60, 4.60]],
+    motion: [[0, 0], [24, 0.0], [34, 3.20], [42, 4.60], [68, 4.60]],
     hitbox: { offset: 1.20, radius: 0.95, yMin: 0.20, yMax: 2.10 },
   },
 

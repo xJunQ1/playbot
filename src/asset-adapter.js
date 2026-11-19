@@ -44,22 +44,22 @@ export const STRIKE = {
 export const DEFAULT_CLIP_MAP = {
   idle: 'Idle',
   move: 'Running',
-  moveback: 'WalkBackFull',   // 运行时合成：Walking 的上半身 + WalkBack 的腿
   walk: 'Walking',            // Boss 踱步 / 绕圈时用
   roll: 'Dive_Roll',
-  block: 'Blocking',
+  moveback: 'Backstep',
+  block: 'Blocking',   // 格挡：直接用 格挡.fbx 原始动作（重新转换的 0.95s 版本）
   blockmove: 'BlockMove',
   hitstun: 'Getting_Hit_Backwards',
   guardbreak: 'Getting_Hit_Backwards',
   dead: 'Death',
   // 三段按「动作类型」拉开，保证一眼能分出打到第几下：
   //   横劈 → 跳劈 → 旋身斩
-  p_light1: 'Stable_Sword_Outward_Slash',  // 横劈
-  p_light2: 'Light_3',                     // 旋身斩
-  p_light3: 'Stable_Sword_Inward_Slash',   // 剑盾斩收尾
+  p_light1: 'Stable_Sword_Inward_Slash',   // 轻击第一段
+  p_light2: 'Stable_Sword_Outward_Slash',  // 轻击第二段
+  p_light3: 'Light_3',                     // 轻击第三段（侧踢）
   p_heavy: 'Great_Sword_Slash',
-  p_heavy2: 'Heavy_3',          // 剑盾横扫
-  p_heavy3: 'Standing_Dodge_Forward',   // 突进冲撞收尾
+  p_heavy2: 'Great_Sword_Attack',   // 重击第二段
+  p_heavy3: 'Heavy_3',              // 重击第三段
   b_sweep: 'Great_Sword_Attack',
   b_slam: 'Great_Sword_Slash',
   b_charge: 'Standing_Dodge_Forward',
@@ -203,13 +203,12 @@ export class ModelBinder {
           const frames = totalFrames(actor.move);
           const ratio = (next.getClip().duration * 60) / Math.max(1, frames);
           next.setEffectiveTimeScale(ratio);
-        } else if (key === 'blockmove' || key === 'moveback') {
-          // 只给「格挡慢走」做速度缩放：慢速时脚滑特别刺眼，步频必须跟上。
-          // 跑动不做缩放 —— 跑步动画按原速播观感最好，为了对齐步频去调快
-          // 反而把节奏弄乱，而高速下那点滑步根本看不出来。
-          // ref 越大 → timeScale 越小 → 摆动越慢。
-          // moveback 调到 1.65：速度 2.31 / 1.65 = 1.40，比原来的 1.78 慢一档。
-          const ref = key === 'moveback' ? 1.65 : 1.40;
+        } else if (key === 'moveback') {
+          // 后退片段自带根位移 ≈0.98 m/s；播放速度跟实际移动速度对齐，避免脚底打滑
+          const NATURAL = 0.98;
+          next.setEffectiveTimeScale(THREE.MathUtils.clamp(actor.speed / NATURAL, 0.55, 2.6));   // 上限放宽，快退时也能和位移对齐
+        } else if (key === 'blockmove') {
+          const ref = 1.40;
           const sp = actor.speed > 0.05 ? actor.speed : ref;
           next.setEffectiveTimeScale(THREE.MathUtils.clamp(sp / ref, 0.45, 2.2));
         } else {
@@ -226,6 +225,7 @@ export class ModelBinder {
     }
 
     this.mixer.update(dt);
+    if (this.gripEnabled !== false) applySwordGrip(this.root, 'Right');   // 握剑手：右手五指卷曲
   }
 
   _clipKey(actor) {
@@ -238,9 +238,10 @@ export class ModelBinder {
     if (actor.state === 'block' && actor.moving) return 'blockmove';
     // 站立但脚下在动（Boss 踱步/绕圈）：播走路，不要原地站着平移
     if (actor.state === 'idle' && actor.moving) return 'walk';
+    // 锁定视角时按 S：面朝 Boss 后退，用 后退.fbx 的动作
+    if (actor.lockOn && actor.state === 'move' && actor.moveAxis < 0) return 'moveback';
     // 只要带后退分量就播倒退走（含 S+A / S+D 斜向后退）。
     // 朝向在 applyMoveInput 里已经反过来了，所以斜向后退也是正确的倒退姿态。
-    if (actor.state === 'move' && actor.moveAxis < 0) return 'moveback';
     return actor.state;
   }
 }
@@ -255,24 +256,54 @@ export class ModelBinder {
  * 类魂动作包 —— 全部来自用户的 Mixamo 账号，和 Y_Bot 同一条导出管线。
  * 同源意味着 rest pose 完全一致，retargetClip 会退化成恒等变换，动作零畸变。
  */
+/**
+ * 「去外展」只对这几个片段生效（单位：度），其余片段 0 = 完全不动。
+ * 全局生效会把待机/攻击这类本来就正常的动作收成内八，所以按片段配置。
+ */
+export const LEG_ABDUCT_CLIPS = {
+  // 每个片段单独给角度：leg = 大腿内收，calf = 小腿内收（单位：度）
+  // 后退目标：膝距 16.6 cm、脚距 14.2 cm
+  WalkBack: { leg: 11.95, calf: 1.5, arm: 0 },
+};
+
 export const SOULS_PACK = {
-  Idle: 'assets/Idle.glb',
-  Walking: 'assets/Walking.glb',
-  Running: 'assets/Running.glb',
-  WalkBack: 'assets/Walking_Backwards_1.glb',   // 1.20s/72f，步频比原版快
-  Dive_Roll: 'assets/Stand_To_Roll.glb',
-  Blocking: 'assets/Great_Sword_Blocking.glb',
+  Idle: 'assets/player/Idle.glb',
+  Walking: 'assets/player/Running.glb',
+  Running: 'assets/player/Running.glb',
+  WalkBack: 'assets/Walking_Backwards_1_shortstride.glb',   // 1.20s/72f，步频比原版快
+  Dive_Roll: 'assets/player/Dive_Roll.glb',
+  Blocking: 'assets/player/Blocking.glb',
   BlockWalk: 'assets/sword_and_shield_walk.glb',   // 只取下半身，和 Blocking 合成 BlockMove
-  Getting_Hit_Backwards: 'assets/Reaction.glb',
-  Death: 'assets/Two_Handed_Sword_Death.glb',
-  Stable_Sword_Inward_Slash: 'assets/Sword_And_Shield_Slash.glb',
-  Stable_Sword_Outward_Slash: 'assets/Sword_Slash.glb',
-  Great_Sword_Slash: 'assets/Great_Sword_Slash.glb',
-  Great_Sword_Attack: 'assets/Great_Sword_High_Spin_Attack.glb',
+  Getting_Hit_Backwards: 'assets/player/Getting_Hit_Backwards.glb',
+  Death: 'assets/player/Death.glb',
+  BlockingStance: 'assets/player/Blocking_v2.glb',
+  BlockingUp: 'assets/player/Blocking_stand_v2.glb',   // 站姿格挡：躯干摆正 + 剑横挡（v2）
+  SH_x30: 'assets/player/SH_x30.glb',
+  SH_x_30: 'assets/player/SH_x_30.glb',
+  SH_y30: 'assets/player/SH_y30.glb',
+  SH_y_30: 'assets/player/SH_y_30.glb',
+  SH_z30: 'assets/player/SH_z30.glb',
+  SH_z_30: 'assets/player/SH_z_30.glb',  BS_z30: 'assets/player/BS_z30.glb',
+  BS_z_30: 'assets/player/BS_z_30.glb',
+  BS_z60: 'assets/player/BS_z60.glb',
+  BS_z_60: 'assets/player/BS_z_60.glb',  BS_x25: 'assets/player/BS_x25.glb',
+  BS_x_25: 'assets/player/BS_x_25.glb',
+  BS_x45: 'assets/player/BS_x45.glb',
+  BS_x_45: 'assets/player/BS_x_45.glb',
+  Bh_x90: 'assets/player/Bh_x90.glb',
+  Bh_x_90: 'assets/player/Bh_x-90.glb',
+  Bh_z90: 'assets/player/Bh_z90.glb',
+  Bh_z_90: 'assets/player/Bh_z-90.glb',
+  Bh_y90: 'assets/player/Bh_y90.glb',
+  Backstep: 'assets/player/Backstep.glb',   // 后退：原始动作（膝 24.0 / 脚 19.4 cm，比例自然，不交叉不外翻）
+  Stable_Sword_Inward_Slash: 'assets/player/Stable_Sword_Inward_Slash.glb',
+  Stable_Sword_Outward_Slash: 'assets/player/Stable_Sword_Outward_Slash.glb',
+  Great_Sword_Slash: 'assets/player/Great_Sword_Slash.glb',
+  Great_Sword_Attack: 'assets/player/Great_Sword_Attack.glb',
   Standing_Dodge_Forward: 'assets/Standing_Dodge_Forward.glb',
-  Light_3: 'assets/Great_Sword_High_Spin_Attack.glb',   // 轻击终结：旋身斩
-  Heavy_2: 'assets/sword_and_shield_jump.glb',          // 重击二段：跳劈
-  Heavy_3: 'assets/Sword_And_Shield_Slash.glb',         // 重击终结：同一文件、更长的截取
+  Light_3: 'assets/player/Light_3.glb',   // 轻击终结：旋身斩
+  Heavy_2: 'assets/player/Great_Sword_Attack.glb',          // 重击二段：跳劈
+  Heavy_3: 'assets/player/Heavy_3.glb',         // 重击终结：同一文件、更长的截取
 };
 
 /**
@@ -349,7 +380,43 @@ function lookupSourceByAlias(targetName, sByBase) {
   return null;
 }
 
-function retargetClip(targetRoot, sourceRoot, clip) {
+export function retargetClip(targetRoot, sourceRoot, clip, opts = {}) {
+  // ── 去外展（把 Mixamo 动画自带的外八站姿收窄）─────────────────────────────
+  // 大腿绕「骨骼本地 Z 轴」内收；脚掌反向补一半，避免内八。
+  // 想关掉就加 URL 参数 ?legabduct=0；想更窄就调大（单位：度）。
+  const qsAbduct = new URLSearchParams(location.search).get('legabduct');
+  const LEG_ABDUCT = THREE.MathUtils.degToRad(
+    qsAbduct != null ? Number(qsAbduct) : (opts.legAbduct ?? 0)
+  );
+  const qsCalf = new URLSearchParams(location.search).get('calfabduct');
+  const CALF_ABDUCT = THREE.MathUtils.degToRad(
+    qsCalf != null ? Number(qsCalf) : (opts.calfAbduct ?? 0)
+  );
+  const CALF_BONE = /^mixamorig(Left|Right)Leg$/;
+  const qsArm = new URLSearchParams(location.search).get('armadduct');
+  const ARM_ABDUCT = THREE.MathUtils.degToRad(
+    qsArm != null ? Number(qsArm) : (opts.armAdduct ?? 0)
+  );
+  const qsArmPitch = new URLSearchParams(location.search).get('armpitch');
+  const ARM_PITCH = THREE.MathUtils.degToRad(
+    qsArmPitch != null ? Number(qsArmPitch) : (opts.armPitch ?? 0)
+  );
+  const ARM_BONE = /^mixamorig(Left|Right)Arm$/;
+  const armAxisKey = (new URLSearchParams(location.search).get('armaxis') || opts.armAxis || 'x').toLowerCase();
+  const armAxisVec = armAxisKey === 'y' ? new THREE.Vector3(0, 1, 0)
+    : armAxisKey === 'z' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+  const qArmPitch = new THREE.Quaternion().setFromAxisAngle(armAxisVec, ARM_PITCH);
+  const qArmL = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -ARM_ABDUCT);
+  const qArmR = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), ARM_ABDUCT);
+  const Z_AXIS = new THREE.Vector3(0, 0, 1);
+  const qCalfL = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, -CALF_ABDUCT);
+  const qCalfR = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, CALF_ABDUCT);
+  const LEG_BONE = /^mixamorig(Left|Right)UpLeg$/;
+  const FOOT_BONE = /^mixamorig(Left|Right)Foot$/;
+  const qLegL = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, -LEG_ABDUCT);
+  const qLegR = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, LEG_ABDUCT);
+  const qFootL = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, LEG_ABDUCT * 0.5);
+  const qFootR = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, -LEG_ABDUCT * 0.5);
   const tMap = new Map();
   const sMap = new Map();
   targetRoot.traverse((o) => { if (o.name) tMap.set(o.name, o); });
@@ -404,6 +471,11 @@ function retargetClip(targetRoot, sourceRoot, clip) {
       tmp.premultiply(qsInv);   // sourceRest⁻¹ · anim
       tmp.premultiply(qt);      // targetRest · (...)
       tmp.normalize();
+      // leg de-abduction: thigh inward, foot counter-half
+      if (LEG_BONE.test(bone)) tmp.multiply(bone.includes('Left') ? qLegL : qLegR);
+      else if (CALF_BONE.test(bone)) tmp.multiply(bone.includes('Left') ? qCalfL : qCalfR);
+      else if (ARM_BONE.test(bone)) { tmp.multiply(bone.includes('Left') ? qArmL : qArmR); tmp.multiply(qArmPitch); }
+      else if (FOOT_BONE.test(bone)) tmp.multiply(bone.includes('Left') ? qFootL : qFootR);
       tmp.toArray(vals, k);
     }
     out.push(new THREE.QuaternionKeyframeTrack(`${t.name}.quaternion`, track.times, vals));
@@ -556,7 +628,99 @@ function sliceClip(clip, startFrame, endFrame, fps = 60) {
  * 看起来像「格挡和走路两个动作同时播」。取格挡的上半身 + 走路的腿，
  * 才是「举着盾走」。
  */
-function blendUpperLower(upperClip, lowerClip, name, opts = {}) {
+/**
+ * 把 source 的手臂轨道（肩/大臂/小臂/手/手指）替换进 target，其余轨道保留。
+ * 用途：倒退走要「手臂外张下垂」的观感，但躯干仍用慢跑的（带前倾）。
+ */
+const ARM_TRACK_RE = /^mixamorig(Left|Right)(Shoulder|Arm|ForeArm|Hand|HandThumb|HandIndex|HandMiddle|HandRing|HandPinky)/;
+export function swapArmTracks(target, source) {
+  const armTracks = new Map();
+  for (const tr of source.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (ARM_TRACK_RE.test(bone)) armTracks.set(tr.name, tr.clone());
+  }
+  if (!armTracks.size) return target;
+  const out = [];
+  for (const tr of target.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (ARM_TRACK_RE.test(bone)) {
+      const rep = armTracks.get(tr.name);
+      if (rep) out.push(rep);
+    } else {
+      out.push(tr);
+    }
+  }
+  return new THREE.AnimationClip(target.name, target.duration, out);
+}
+/**
+ * 把 source 的下半身轨道（髋/腿/脚）替换进 target，上半身（脊椎+手臂+头）保留 target 的。
+ * 用途：格挡片段原本是蹲姿（腿弯），换成待机的腿 → 站着举盾，同时手臂/剑的姿态不被破坏。
+ */
+const LOWER_TRACK_RE = /^mixamorig(Hips|LeftUpLeg|RightUpLeg|LeftLeg|RightLeg|LeftFoot|RightFoot|LeftToeBase|RightToeBase)$/;
+/**
+ * 只替换腿部骨骼轨道，保留 Hips —— 上半身和髋同源时不会出现「脊柱侧倾」。
+ */
+const LEG_TRACK_RE = /^mixamorig(LeftUpLeg|RightUpLeg|LeftLeg|RightLeg|LeftFoot|RightFoot|LeftToeBase|RightToeBase)$/;
+export function swapLegTracks(target, source) {
+  const legs = new Map();
+  for (const tr of source.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (LEG_TRACK_RE.test(bone)) legs.set(tr.name, tr.clone());
+  }
+  if (!legs.size) return target;
+  const out = [];
+  for (const tr of target.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (LEG_TRACK_RE.test(bone)) {
+      const rep = legs.get(tr.name);
+      if (rep) out.push(rep);
+    } else out.push(tr);
+  }
+  return new THREE.AnimationClip(target.name, target.duration, out);
+}
+export function swapLowerTracks(target, source) {
+  const lower = new Map();
+  for (const tr of source.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (LOWER_TRACK_RE.test(bone)) lower.set(tr.name, tr.clone());
+  }
+  if (!lower.size) return target;
+  const out = [];
+  for (const tr of target.tracks) {
+    const bone = tr.name.slice(0, tr.name.lastIndexOf('.'));
+    if (LOWER_TRACK_RE.test(bone)) {
+      const rep = lower.get(tr.name);
+      if (rep) out.push(rep);
+    } else {
+      out.push(tr);
+    }
+  }
+  return new THREE.AnimationClip(target.name, target.duration, out);
+}
+/**
+ * 握剑手：把右手五指卷起来。项目里手指骨骼没有被动画驱动，
+ * 所以每帧直接设成本地 Z 轴卷曲即可（实测 z 轴 70° 时指尖到掌心最近）。
+ */
+const GRIP_FINGERS = [
+  // 指节 1 / 2 / 3 的卷曲角度（绕手骨本地 Z 轴）
+  ['Index', 72, 88, 70],
+  ['Middle', 76, 92, 72],
+  ['Ring', 78, 92, 72],
+  ['Pinky', 80, 94, 74],
+  ['Thumb', 40, 46, 34],
+];
+export function applySwordGrip(root, side = 'Right') {
+  const z = new THREE.Vector3(0, 0, 1);
+  for (const [name, a1, a2, a3] of GRIP_FINGERS) {
+    for (let seg = 1; seg <= 3; seg++) {
+      const bone = root.getObjectByName(`mixamorig${side}Hand${name}${seg}`);
+      if (!bone) continue;
+      const deg = seg === 1 ? a1 : seg === 2 ? a2 : a3;
+      bone.quaternion.setFromAxisAngle(z, THREE.MathUtils.degToRad(deg));
+    }
+  }
+}
+export function blendUpperLower(upperClip, lowerClip, name, opts = {}) {
   const LOWER = new Set([
     'mixamorigHips',
     'mixamorigLeftUpLeg', 'mixamorigRightUpLeg',
@@ -737,7 +901,16 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
       // 统一用「局部增量」重定向：target = rest · (sourceRest⁻¹ · anim)。
       // 它对两侧 rest 的轴向差异不敏感；世界空间版本会把 Mixamo 绑定姿势里
       // 的 -90° 轴修正当成动作，导致整个人往前倒。
-      clip = retargetClip(binder.root, g.scene, clip);
+      const legCfg = LEG_ABDUCT_CLIPS[name] || {};
+      clip = retargetClip(binder.root, g.scene, clip, {
+        legAbduct: legCfg.leg ?? 0,
+        calfAbduct: legCfg.calf ?? 0,
+      });
+      // 后退片段里其实是「两步」(实测一个循环 ≈1.86s)；原片 2.55s，循环点在相位中间，
+      // 一播到底会看到姿势跳一下 = 用户说的「重播」。这里精确切一个循环，首尾同相，循环无跳变。
+      if (name === 'Backstep') {
+        clip = sliceClip(clip, 0, Math.round(clip.duration * 60 * (1.86 / 2.55)), 60);
+      }
 
       // ② 砍掉后半段回位：动捕会把动作慢慢收回静止姿势，游戏里只要「挥完就停」
       const info = STRIKE[name];
@@ -772,15 +945,37 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
   // 合成「倒退走」：WalkBack 这段动画的前臂四元数 w 在 0.87~0.97，
   // 几乎不转 —— 手臂是僵直外撇的，直接播会像胳膊折了。
   // 上半身借 Walking 的自然摆臂，下半身用 WalkBack 的腿。
-  const walkUp = binder.clips.get('Walking');
+  // 上半身用 Walking（=慢跑）的手臂：肘部弯、手在身前，不会「外张下垂」。
+  // 不要用 Idle —— 新模型的 Idle 手臂是摊开下垂的（实测两手间距 35.8cm、手高 1.03m），
+  // 拿来当后退的上半身会很难看；Running 是 15.4cm / 1.18m。
+  const walkUp = binder.clips.get('Walking') || binder.clips.get('Running');
   const backLo = binder.clips.get('WalkBack');
   if (walkUp && backLo) {
     // 倒退走时躯干总共前倾 25°，三节脊椎各分 1/3（8.33°）。
     // 用度写清楚，别再算弧度。
-    binder.clips.set('WalkBackFull',
-      blendUpperLower(walkUp, backLo, 'WalkBackFull', { lean: THREE.MathUtils.degToRad(25) }));
+    // lean 取负 = 躯干略前倾；+25° 会把上半身压得往后仰，手臂看起来「抡到身后」。
+    // -15° 实测：手相对髋 −3.1 cm（自然下垂），头高 1.017 m
+    let backFull = blendUpperLower(walkUp, backLo, 'WalkBackFull', { lean: THREE.MathUtils.degToRad(-15) });
+    // 手臂单独换成 Idle 的「外张下垂」姿态（躯干仍用慢跑上半身 + 25° 前倾）
+    const idleArms = binder.clips.get('Idle');
+    if (idleArms) backFull = swapArmTracks(backFull, idleArms);
+    const armCount = backFull.tracks.filter((tr) => ARM_TRACK_RE.test(tr.name.slice(0, tr.name.lastIndexOf('.')))).length;
+    console.log('[anim-pack] WalkBackFull 手臂轨道:', armCount, ' 两条腿脚距由 LEG_ABDUCT_CLIPS 决定');
+    binder.clips.set('WalkBackFull', backFull);
   }
 
+  // 静止格挡 = 站姿：身体/腿用 Idle，手臂用 Blocking 的举盾姿势
+  {
+    const idleClip = binder.clips.get('Idle');
+    const blockClip = binder.clips.get('Blocking');
+    if (idleClip && blockClip) {
+      binder.clips.set('BlockStance', swapArmTracks(idleClip, blockClip));
+      // 站姿格挡（推荐）：保留 Blocking 的上半身/手臂/剑，只把腿换成待机的站姿
+      const blockUpName = new URLSearchParams(location.search).get('blockup') || 'BlockingUp';
+      const blockUp = binder.clips.get(blockUpName) || blockClip;
+      binder.clips.set('BlockStand', swapLowerTracks(blockUp, idleClip));   // Idle 的髋+腿（站姿、脚贴地）+ Blocking 的脊柱/手臂
+    }
+  }
   return loaded;
 }
 

@@ -34,3 +34,11 @@ docs/*.jpeg
 docs/*.webp
 docs/*.py
 docs/*.txt
+
+
+# 动作调参的临时/实验产物（不入库）
+assets/player/_experiments/
+assets/player/_*.glb
+assets/player/Blocking_test.glb
+assets/Walking_Backwards_1_narrow*.glb
+assets/Walking_Backwards_1_shortstride.glb

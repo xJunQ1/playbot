@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>握剑手预览</title>
+<style>html,body{margin:0;height:100%;background:#20242c;overflow:hidden}canvas{display:block}
+#hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { applySwordGrip } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const GRIP = QS.get('grip') !== '0';
+const AZ = parseFloat(QS.get('az') || '0');
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.setPixelRatio(1);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x20242c);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.1));
+const dir = new THREE.DirectionalLight(0xffffff, 1.6); dir.position.set(1, 2, 2); scene.add(dir);
+const dir2 = new THREE.DirectionalLight(0xaaccff, 0.7); dir2.position.set(-2, 1, -1); scene.add(dir2);
+
+const gltf = await new GLTFLoader().loadAsync('../assets/player/player.glb');
+const model = gltf.scene;
+scene.add(model);
+// 把手臂抬起来，避免手掌被裙甲挡住
+{
+  const arm = model.getObjectByName('mixamorigRightArm');
+  const fore = model.getObjectByName('mixamorigRightForeArm');
+  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(-100));
+  if (arm) arm.quaternion.copy(qx);
+  if (fore) fore.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(-25));
+}
+if (GRIP) applySwordGrip(model, 'Right');
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+model.updateMatrixWorld(true);
+
+const hand = B['mixamorigRightHand'];
+const center = hand.getWorldPosition(new THREE.Vector3());
+
+const cam = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.01, 50);
+const r = 0.30;
+cam.position.set(center.x + Math.sin(AZ) * r, center.y + 0.05, center.z + Math.cos(AZ) * r);
+cam.lookAt(center);
+cam.updateMatrixWorld();
+
+// 距离统计（指尖到掌心）
+const tips = [];
+for (const f of ['Index', 'Middle', 'Ring', 'Pinky', 'Thumb']) {
+  const b = B[`mixamorigRightHand${f}3`];
+  if (b) tips.push(b.getWorldPosition(new THREE.Vector3()));
+}
+const dist = tips.reduce((s, t) => s + t.distanceTo(center), 0);
+document.getElementById('hud').textContent =
+  `${GRIP ? '握剑（手指卷曲）' : '张开（原始）'}\n指尖-掌心距离和: ${(dist * 100).toFixed(1)} cm`;
+
+renderer.render(scene, cam);
+window.__ready = true;
+window.__dist = +(dist * 100).toFixed(1);
+</script>
+</body>
+</html>

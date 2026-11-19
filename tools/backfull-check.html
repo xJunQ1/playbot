@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>倒退走合成片段校验（Idle 上半身 + 后退腿）</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">loading…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { retargetClip, blendUpperLower, swapArmTracks } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const UPPER = QS.get('upper') || '../assets/player/Idle.glb';
+const LOWER = QS.get('lower') || '../assets/Walking_Backwards_1_shortstride.glb';
+const T = parseFloat(QS.get('t') || '0.5');
+const YAW = parseFloat(QS.get('yaw') || '180');
+const LEAN = parseFloat(QS.get('lean') || '25');
+
+const loader = new GLTFLoader();
+const model = (await loader.loadAsync(MODEL)).scene;
+const [gUpper, gLower] = await Promise.all([loader.loadAsync(UPPER), loader.loadAsync(LOWER)]);
+
+const ARM = parseFloat(QS.get('armadduct') || '0');
+const PITCH = parseFloat(QS.get('armpitch') || '0');
+const up = retargetClip(model, gUpper.scene, gUpper.animations[0], { legAbduct: 0, calfAbduct: 0, armAdduct: ARM, armPitch: 0 });
+const lo = retargetClip(model, gLower.scene, gLower.animations[0], { legAbduct: 11.95, calfAbduct: 1.5, armAdduct: 0 });
+let clip = blendUpperLower(up, lo, 'WalkBackFull', { lean: THREE.MathUtils.degToRad(LEAN) });
+if (QS.get('swarm') === '1') {
+  const armsUrl = QS.get('arms') || '../assets/player/Idle.glb';
+  const gArms = await loader.loadAsync(armsUrl);
+  const arms = retargetClip(model, gArms.scene, gArms.animations[0], { legAbduct: 0, calfAbduct: 0, armPitch: PITCH });
+  clip = swapArmTracks(clip, arms);
+}
+
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+mixer.setTime(T);
+model.updateMatrixWorld(true);
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const HL = B['mixamorigLeftHand'], HR = B['mixamorigRightHand'];
+const body = new THREE.Box3().setFromObject(model);
+const h = body.max.y - body.min.y;
+const center = body.getCenter(new THREE.Vector3());
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.5;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1d24);
+scene.add(new THREE.HemisphereLight(0xc8d6ee, 0x24282f, 2.2));
+const k = new THREE.DirectionalLight(0xffffff, 3.0); k.position.set(2.4, 3.6, 2.8); scene.add(k);
+const f = new THREE.DirectionalLight(0x9db9ff, 1.8); f.position.set(-2.6, 1.8, 1.2); scene.add(f);
+model.position.y -= body.min.y;
+scene.add(model);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.01, 100);
+const dist = (h * 0.62) / Math.tan((camera.fov * Math.PI / 180) / 2);
+const yaw = YAW * Math.PI / 180;
+camera.position.set(Math.sin(yaw) * dist, h * 0.55, Math.cos(yaw) * dist);
+camera.lookAt(0, h * 0.5, 0);
+
+const pL = HL.getWorldPosition(new THREE.Vector3()), pR = HR.getWorldPosition(new THREE.Vector3());
+const handDist = pL.distanceTo(pR);
+const handX = Math.abs(pL.x - pR.x);
+const handY = (pL.y + pR.y) / 2;
+const hud = document.getElementById('hud');
+hud.textContent =
+  `合成: ${UPPER.split('/').pop()}（上半身） + ${LOWER.split('/').pop()}（腿）\n` +
+  `t=${T}s  两手间距 ${(handDist*100).toFixed(1)} cm（横向 ${(handX*100).toFixed(1)}）  手高 ${handY.toFixed(3)} m  armAdduct=${ARM}°`;
+
+renderer.render(scene, camera);
+window.__ready = true;
+window.__dbg = {
+  total: clip.tracks.length,
+  armNames: clip.tracks.filter((tr) => /Arm/.test(tr.name)).map((tr) => tr.name).slice(0, 6),
+  sample: (() => { const tr = clip.tracks.find((x) => x.name.endsWith('LeftHand.quaternion')); return tr ? Array.from(tr.values.slice(0, 4)).map((v) => +v.toFixed(3)) : null; })(),
+};
+const hipsPos = B['mixamorigHips'].getWorldPosition(new THREE.Vector3());
+const handZrel = ((pL.z + pR.z) / 2) - hipsPos.z;
+window.__result = { handDist: +(handDist*100).toFixed(1), handX: +(handX*100).toFixed(1), handY: +handY.toFixed(3), handZrel: +(handZrel*100).toFixed(1), tracks: clip.tracks.length };
+</script>
+</body>
+</html>
