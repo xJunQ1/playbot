@@ -586,6 +586,7 @@ const boss = new Actor({
   name: 'BOSS', isBoss: true, scale: 2.6, pos: [0, -8],
   hp: 3200, poise: 120, hurt: { radius: 1.15, height: 4.6 },
 });
+if (location.search.includes('debug')) window.__boss = boss;   // Boss（动作 / AI 排查用）
 
 // ═══════════════════════════════════════════════════════════════
 //  4. 判定：圆柱近似（灰盒足够，替换真美术后可换胶囊扫掠）
@@ -1158,7 +1159,7 @@ function bossTick() {
         AI.phase2 = true;
         AI.intentUntil = 0;
         AI.feintChecked = false;
-        boss.setState('attack', 'b_roar');
+        // 「怒吼」动作已取消：阶段转换只做横幅 / 场景变化，不再播那段站着扭头的动作
         boss.moving = false;
         // 二阶段：场景推到血月（法阵转红、雾变浓、火盆变血焰）
         STAGE.setPhase(2);
@@ -1170,7 +1171,7 @@ function bossTick() {
       if (!AI.phase3 && boss.hp < boss.maxHp * 0.25) {
         AI.phase3 = true;
         AI.intentUntil = 0;
-        boss.setState('attack', 'b_roar');
+        // 「怒吼」动作已取消：阶段转换只做横幅 / 场景变化，不再播那段站着扭头的动作
         boss.moving = false;
         return;
       }
@@ -2342,7 +2343,7 @@ function resetFight() {
             block: 'block',
             b_sweep: 'combo1',
             b_slam: 'combo2',
-            b_roar: 'cast',
+            // b_roar 已移除（动作取消）
             hitstun: 'hit',
             guardbreak: 'hit',
             dead: 'dead',

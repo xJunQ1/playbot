@@ -135,14 +135,6 @@ export const MOVES = {
     minRange: 0, maxRange: 4.5, weight: 0.85, cooldown: 2.0,
   },
 
-  b_roar: {
-    label: '怒吼（免费招）', swing: 'none',
-    startup: 110, active: 0, recovery: 40, cancelFrom: 0,
-    damage: 0, poise: 0, hitstun: 0, stamina: 0,
-    motion: [[0, 0]],
-    hitbox: { offset: 0, radius: 0, yMin: 0, yMax: 0 },
-    minRange: 0, maxRange: 30, weight: 0.28, cooldown: 14,
-  },
 };
 
 /** 派生：总帧数 */

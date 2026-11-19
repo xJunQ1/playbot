@@ -64,7 +64,6 @@ export const DEFAULT_CLIP_MAP = {
   b_sweep: 'Great_Sword_Attack',
   b_slam: 'Great_Sword_Slash',
   b_charge: 'Standing_Dodge_Forward',
-  b_roar: 'Stable_Sword_Inward_Slash',   // 必须是 SOULS_PACK 的键，不是文件名
 };
 
 export class ModelBinder {
