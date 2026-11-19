@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>后退站姿校验（走游戏同一条 retarget 管线）</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">measuring…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { retargetClip } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/Walking_Backwards_1_shortstride.glb';
+
+const loader = new GLTFLoader();
+const model = (await loader.loadAsync(MODEL)).scene;
+const clipGltf = await loader.loadAsync(CLIPURL);
+const srcClip = clipGltf.animations[0];
+
+// 用游戏里那条管线做重定向（含去外展）
+const clip = retargetClip(model, clipGltf.scene, srcClip);
+
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const CL_ = B['mixamorigLeftFoot'], CR = B['mixamorigRightFoot'];
+const KL = B['mixamorigLeftLeg'], KR = B['mixamorigRightLeg'];
+const HD = B['mixamorigHead'];
+
+const N = 24, dur = clip.duration;
+let foot = 0, knee = 0, stride = 0, headY = 0, footMin = 9, footMax = 0;
+const v = () => new THREE.Vector3();
+
+for (let i = 0; i < N; i++) {
+  mixer.setTime((i / N) * dur);
+  model.updateMatrixWorld(true);
+  const f1 = CL_.getWorldPosition(v()), f2 = CR.getWorldPosition(v());
+  const k1 = KL.getWorldPosition(v()), k2 = KR.getWorldPosition(v());
+  const hd = HD.getWorldPosition(v());
+  foot += Math.abs(f1.x - f2.x);
+  knee += Math.abs(k1.x - k2.x);
+  stride = Math.max(stride, Math.abs(f1.z - f2.z));
+  headY += hd.y;
+  footMin = Math.min(footMin, Math.abs(f1.x - f2.x));
+  footMax = Math.max(footMax, Math.abs(f1.x - f2.x));
+}
+
+const out = {
+  model: MODEL.split('/').pop(),
+  clip: CLIPURL.split('/').pop(),
+  tracks: clip.tracks.length,
+  footAvg: +(foot / N * 100).toFixed(1),
+  footMin: +(footMin * 100).toFixed(1),
+  footMax: +(footMax * 100).toFixed(1),
+  kneeAvg: +(knee / N * 100).toFixed(1),
+  strideMax: +(stride * 100).toFixed(1),
+  headY: +(headY / N).toFixed(4),
+  dur: +dur.toFixed(2),
+};
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>片段体检：倾斜 / 循环连续性</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">auditing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { retargetClip } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/player/Backstep_v2.glb';
+const RETARGET = QS.get('rt') !== '0';
+
+const loader = new GLTFLoader();
+const model = (await loader.loadAsync(MODEL)).scene;
+const g = await loader.loadAsync(CLIPURL);
+const raw = g.animations[0];
+const clip = RETARGET ? retargetClip(model, g.scene, raw, {}) : raw;
+
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const HIPS = B['mixamorigHips'], HEAD = B['mixamorigHead'];
+const LF = B['mixamorigLeftFoot'], RF = B['mixamorigRightFoot'];
+
+const N = 60, dur = clip.duration;
+let leanSum = 0, leanMax = 0, tiltMax = 0, tiltSum = 0, footSum = 0, footMin = 9, footMax = 0, strideMax = 0;
+const poses = [];
+const v3 = () => new THREE.Vector3();
+
+for (let i = 0; i <= N; i++) {
+  const t = (i / N) * dur;
+  mixer.setTime(t);
+  model.updateMatrixWorld(true);
+  const h = HIPS.getWorldPosition(v3());
+  const hd = HEAD.getWorldPosition(v3());
+  // 躯干在正面平面内的倾斜角（相对竖直）
+  const dx = hd.x - h.x, dy = hd.y - h.y;
+  const dz = hd.z - h.z;
+  const tilt = Math.abs(Math.atan2(dx, Math.max(1e-6, dy)) * 180 / Math.PI);
+  const lean = Math.atan2(dz, Math.max(1e-6, dy)) * 180 / Math.PI;
+  leanSum += lean; leanMax = Math.max(leanMax, Math.abs(lean));
+  tiltMax = Math.max(tiltMax, tilt); tiltSum += tilt;
+
+  const f1 = LF.getWorldPosition(v3()), f2 = RF.getWorldPosition(v3());
+  const sep = Math.abs(f1.x - f2.x);
+  footSum += sep; footMin = Math.min(footMin, sep); footMax = Math.max(footMax, sep);
+  strideMax = Math.max(strideMax, Math.abs(f1.z - f2.z));
+
+  if (i === 0 || i === N) {
+    const snap = [];
+    for (const n of Object.keys(B)) snap.push([n, B[n].quaternion.clone()]);
+    poses.push(snap);
+  }
+}
+
+// 首尾帧差异（循环连续性）
+let maxDelta = 0, worstBone = '';
+if (poses.length === 2) {
+  const [a, b2] = poses;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i][1].angleTo(b2[i][1]) * 180 / Math.PI;
+    if (d > maxDelta) { maxDelta = d; worstBone = a[i][0]; }
+  }
+}
+
+const series = { t: [], hipsY: [], lfZ: [], rfZ: [], lfY: [], rfY: [] };
+for (let i = 0; i <= 48; i++) {
+  const tt = (i / 48) * dur;
+  mixer.setTime(tt);
+  model.updateMatrixWorld(true);
+  const h = HIPS.getWorldPosition(v3());
+  const f1 = LF.getWorldPosition(v3()), f2 = RF.getWorldPosition(v3());
+  series.t.push(+tt.toFixed(2));
+  series.hipsY.push(+h.y.toFixed(3));
+  series.lfZ.push(+f1.z.toFixed(3));
+  series.rfZ.push(+f2.z.toFixed(3));
+  series.lfY.push(+f1.y.toFixed(3));
+  series.rfY.push(+f2.y.toFixed(3));
+}
+window.__series = series;
+
+const out = {
+  clip: CLIPURL.split('/').pop(),
+  retarget: RETARGET,
+  dur: +dur.toFixed(2),
+  tiltMean: +(tiltSum / (N + 1)).toFixed(2),
+  tiltMax: +tiltMax.toFixed(2),
+  leanMean: +(leanSum / (N + 1)).toFixed(2),
+  leanMax: +leanMax.toFixed(2),
+  footAvg: +(footSum / (N + 1) * 100).toFixed(1),
+  footMin: +(footMin * 100).toFixed(1),
+  footMax: +(footMax * 100).toFixed(1),
+  strideMax: +(strideMax * 100).toFixed(1),
+  loopDeltaMax: +maxDelta.toFixed(1),
+  loopWorstBone: worstBone,
+};
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

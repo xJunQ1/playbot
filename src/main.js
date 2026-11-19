@@ -271,6 +271,7 @@ function consume(name, window = BUFFER_WINDOW) {
 // ═══════════════════════════════════════════════════════════════
 //  3. 角色
 // ═══════════════════════════════════════════════════════════════
+console.log('[build] turn-v3 / back-latched / yaw-stripped');
 const HITSTOP_LIGHT = () => CFG.hitstop;
 const HITSTOP_HEAVY = () => CFG.hitstopHeavy;
 
@@ -395,6 +396,7 @@ const player = new Actor({
   name: 'PLAYER', isBoss: false, scale: 1.0, pos: [0, 8],
   hp: 1200, poise: 100, hurt: { radius: 0.40, height: 1.95 },
 });
+if (location.search.includes('debug')) window.__player = player;   // ?debug 排查用
 const boss = new Actor({
   name: 'BOSS', isBoss: true, scale: 2.6, pos: [0, -8],
   hp: 3200, poise: 120, hurt: { radius: 1.15, height: 4.6 },
@@ -535,6 +537,7 @@ function playerTick() {
       if (player.frame >= player.stunTimer) player.setState('idle');
       return;
 
+
     case 'roll': {
       player.frame++;
       // 翻滚位移：前 20 帧走完 4.6m（用抛物线速度曲线）
@@ -604,6 +607,7 @@ function playerTick() {
       if (consume('light')) { player.setState('light1', 'p_light1'); return; }
       if (consume('heavy')) { player.setState('heavy', 'p_heavy'); return; }
 
+      // 按住 S 只转一次：必须松开 S 才能再次触发（防止连点/长按导致连续翻身）
       const moved = applyMoveInput(1.0);
       if (down('block')) { player.setState('block'); return; }
 
@@ -625,7 +629,7 @@ function playerTick() {
  * @returns 这一帧是否真的产生了移动
  */
 function applyMoveInput(speedScale = 1) {
-  const fwdInput = (down('fwd') ? 1 : 0) - (down('back') ? 1 : 0);
+  const fwdInput = (down('fwd') ? 1 : 0) - (down('back') ? 1 : 0);   // S 直接参与移动，不再转身
   const strafeInput = (down('right') ? 1 : 0) - (down('left') ? 1 : 0);
   if (!fwdInput && !strafeInput) {
     player.moving = false;
@@ -637,7 +641,8 @@ function applyMoveInput(speedScale = 1) {
 
   // 倒退比前进慢 —— 这是常识，也是动画能对上的前提。
   // 按 4.2 m/s 倒着跑，倒退走动画得加速 2.7 倍才追得上，直接崩。
-  const axisScale = fwdInput < 0 ? 0.55 : 1.0;
+  // 锁定视角后退（Backstep）用更慢的速度：步子小、速度也得跟着小
+  const axisScale = (player.lockOn && fwdInput < 0) ? 0.452 : 1.0;   // 锁定后退 ≈1.90 m/s
   const speed = CFG.runSpeed * speedScale * axisScale;
 
   player.moving = true;
@@ -653,14 +658,10 @@ function applyMoveInput(speedScale = 1) {
   player.pos.addScaledVector(dir, speed / 60);
   player.clampToArena();
 
+  // 朝向 = 移动方向（S 也是移动方向，不再背对着倒着走）
   const targetYaw = player.lockOn
-    ? Math.atan2(fwd.x, fwd.z)        // 锁定：脸始终对着 Boss
-    // 非锁定后退时朝向要反过来：倒退动画是「面朝前、腿向后迈」，
-    // 如果让角色脸朝移动方向，就成了月球漫步 —— 面朝目标却横着飘过去。
-    // 所以后退时让角色背对移动方向，腿往后踩的方向才和实际位移一致。
-    : (fwdInput < 0
-      ? Math.atan2(-dir.x, -dir.z)
-      : Math.atan2(dir.x, dir.z));
+    ? Math.atan2(fwd.x, fwd.z)
+    : Math.atan2(dir.x, dir.z);
   player.turnToward(targetYaw, player.lockOn ? 16 : 12);
   return true;
 }
@@ -1673,7 +1674,7 @@ function resetFight() {
   // 默认就加载完整美术资源：模型 + 武器 + 动捕包。
   // 想回到纯灰盒（零依赖、秒开）加 ?graybox=1。
   const graybox = q.get('graybox') != null;
-  const pUrl = graybox ? null : (q.get('p') ?? 'assets/Y_Bot.glb');
+  const pUrl = graybox ? null : (q.get('p') ?? 'assets/player/player.glb');
   const bUrl = graybox ? null : (q.get('b') ?? 'assets/Y_Bot.glb');
   const wantWeapon = !graybox && q.get('noweapon') == null;
   const weaponUrl = wantWeapon ? (q.get('wp') ?? 'assets/jian_min.glb') : null;

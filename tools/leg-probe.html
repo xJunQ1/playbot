@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>腿间距探测</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">probing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/Walking_Backwards_1.glb';
+const COMPOSE = QS.get('compose') || 'post';   // post: q' = q * delta ；pre: q' = delta * q
+const AXIS = (QS.get('axis') || 'z').toLowerCase();  // 骨骼局部轴
+const DEG = parseFloat(QS.get('deg') || '0');        // 附加角度（左右相反）
+
+const loader = new GLTFLoader();
+const gltf = await loader.loadAsync(MODEL);
+const model = gltf.scene;
+const clipGltf = await loader.loadAsync(CLIPURL);
+const clip = clipGltf.animations[0];
+
+const mixer = new THREE.AnimationMixer(model);
+const action = mixer.clipAction(clip);
+action.play();
+
+const bones = {};
+model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
+const LU = bones['mixamorigLeftUpLeg'], RU = bones['mixamorigRightUpLeg'];
+const LF = bones['mixamorigLeftFoot'], RF = bones['mixamorigRightFoot'];
+
+const axisVec = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) }[AXIS] || new THREE.Vector3(0, 0, 1);
+const qL = new THREE.Quaternion().setFromAxisAngle(axisVec, THREE.MathUtils.degToRad(DEG));
+const qR = new THREE.Quaternion().setFromAxisAngle(axisVec, THREE.MathUtils.degToRad(-DEG));
+
+const samples = [];
+const dur = clip.duration;
+const N = 24;
+let baseSum = 0, adjSum = 0;
+
+for (let i = 0; i < N; i++) {
+  const t = (i / N) * dur;
+  mixer.setTime(t);
+  model.updateMatrixWorld(true);
+  const lp = LF.getWorldPosition(new THREE.Vector3());
+  const rp = RF.getWorldPosition(new THREE.Vector3());
+  const base = Math.abs(lp.x - rp.x);
+  baseSum += base;
+
+  if (DEG !== 0) {
+    if (COMPOSE === 'post') { LU.quaternion.multiply(qL); RU.quaternion.multiply(qR); }
+    else { LU.quaternion.premultiply(qL); RU.quaternion.premultiply(qR); }
+    model.updateMatrixWorld(true);
+    const lp2 = LF.getWorldPosition(new THREE.Vector3());
+    const rp2 = RF.getWorldPosition(new THREE.Vector3());
+    adjSum += Math.abs(lp2.x - rp2.x);
+  }
+  samples.push([+t.toFixed(2), +base.toFixed(3)]);
+}
+
+const hud = document.getElementById('hud');
+hud.textContent =
+  `clip: ${CLIPURL.split('/').pop()}  ${dur.toFixed(2)}s\n` +
+  `原始平均脚距: ${(baseSum / N).toFixed(4)} m\n` +
+  `调整后平均脚距: ${DEG ? (adjSum / N).toFixed(4) : '-'} m   (${COMPOSE} ${AXIS} ${DEG}°)\n` +
+  samples.slice(0, 8).map((s) => s.join(':')).join('  ');
+window.__ready = true;
+window.__result = { dur, base: baseSum / N, adj: DEG ? adjSum / N : null, compose: COMPOSE, axis: AXIS, deg: DEG };
+</script>
+</body>
+</html>

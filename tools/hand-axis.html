@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>手骨朝向分析（剑沿手骨 +Y）</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">analyzing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { retargetClip } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/player/Blocking_up.glb';
+const T = parseFloat(QS.get('t') || '0.5');
+
+const loader = new GLTFLoader();
+const model = (await loader.loadAsync(MODEL)).scene;
+const g = await loader.loadAsync(CLIPURL);
+const clip = retargetClip(model, g.scene, g.animations[0], {});
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+mixer.setTime(T);
+model.updateMatrixWorld(true);
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const HAND = B['mixamorigRightHand'];
+const HIPS = B['mixamorigHips'];
+const CHEST = B['mixamorigSpine2'];
+
+// 手骨的 +Y = 剑的方向（项目里 sword 就是沿手骨 Y 轴接的）
+const q = new THREE.Quaternion();
+HAND.getWorldQuaternion(q);
+const yAxis = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
+const TARGET = (QS.get('target') || 'up').toLowerCase();
+const up = TARGET === 'side' ? new THREE.Vector3(1, 0, 0)
+         : TARGET === 'front' ? new THREE.Vector3(0, 0, 1)
+         : new THREE.Vector3(0, 1, 0);
+
+// 需要把 yAxis 转到 up 的世界旋转
+const qWorldFix = new THREE.Quaternion().setFromUnitVectors(yAxis, up);
+// 换算成手骨本地空间的修正（右乘）
+const qLocalFix = q.clone().invert().multiply(qWorldFix).multiply(q.clone());
+qLocalFix.normalize();
+
+const axis = new THREE.Vector3();
+let angle = 0;
+{
+  // qLocalFix 的轴向/角度
+  const qq = qLocalFix.clone();
+  if (qq.w < 0) qq.set(-qq.x, -qq.y, -qq.z, -qq.w);
+  angle = 2 * Math.acos(Math.min(1, qq.w)) * 180 / Math.PI;
+  const s = Math.sqrt(Math.max(0, 1 - qq.w * qq.w));
+  axis.set(qq.x / s, qq.y / s, qq.z / s);
+}
+
+const hp = HAND.getWorldPosition(new THREE.Vector3());
+const chest = CHEST.getWorldPosition(new THREE.Vector3());
+const hips = HIPS.getWorldPosition(new THREE.Vector3());
+
+const out = {
+  clip: CLIPURL.split('/').pop(),
+  t: T,
+  handYDir: yAxis.toArray().map((v) => +v.toFixed(2)),
+  target: TARGET,
+  angleToUp: +(Math.acos(THREE.MathUtils.clamp(yAxis.dot(up), -1, 1)) * 180 / Math.PI).toFixed(1),
+  localFixAngleDeg: +angle.toFixed(1),
+  localFixAxis: axis.toArray().map((v) => +v.toFixed(3)),
+  handRelChest: hp.clone().sub(chest).toArray().map((v) => +v.toFixed(2)),
+  handRelHips: hp.clone().sub(hips).toArray().map((v) => +v.toFixed(2)),
+};
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

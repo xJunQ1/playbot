@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>手指弯曲轴探测</title>
+<style>html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}canvas{display:block}
+#hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">probing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const DEG = parseFloat(QS.get('deg') || '55');
+
+const gltf = await new GLTFLoader().loadAsync(MODEL);
+const model = gltf.scene;
+model.updateMatrixWorld(true);
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+
+const FINGERS = ['Index', 'Middle', 'Ring', 'Pinky', 'Thumb'];
+const palm = B['mixamorigRightHand'];
+
+function tipOf(side = 'Right') {
+  const tips = [];
+  for (const f of FINGERS) {
+    const b = B[`mixamorig${side}Hand${f}3`];
+    if (b) tips.push(b.getWorldPosition(new THREE.Vector3()));
+  }
+  return tips;
+}
+function distSum(tips) {
+  const c = palm.getWorldPosition(new THREE.Vector3());
+  return tips.reduce((s, p) => s + p.distanceTo(c), 0);
+}
+
+// 基准
+const base = distSum(tipOf());
+const results = [];
+for (const axis of ['x', 'y', 'z']) {
+  for (const sign of [1, -1]) {
+    // 重置
+    for (const k of Object.keys(B)) B[k].quaternion.set(0, 0, 0, 1);
+    model.updateMatrixWorld(true);
+    const q = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0),
+      THREE.MathUtils.degToRad(DEG) * sign
+    );
+    for (const f of FINGERS) {
+      for (const seg of [1, 2, 3]) {
+        const b = B[`mixamorigRightHand${f}${seg}`];
+        if (b) b.quaternion.copy(q);
+      }
+    }
+    model.updateMatrixWorld(true);
+    results.push({ axis, sign, dist: +(distSum(tipOf()) * 100).toFixed(1) });
+  }
+}
+for (const k of Object.keys(B)) B[k].quaternion.set(0, 0, 0, 1);
+model.updateMatrixWorld(true);
+
+const out = { base: +(base * 100).toFixed(1), deg: DEG, results: results.sort((a, b) => a.dist - b.dist) };
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>玩家模型 / 动作 校验</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">loading…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIP = QS.get('clip') || '';
+const T = parseFloat(QS.get('t') || '0');
+const YAW = parseFloat(QS.get('yaw') || '35');
+const ZOOM = parseFloat(QS.get('zoom') || '1');
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.5;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1d24);
+scene.add(new THREE.HemisphereLight(0xc8d6ee, 0x24282f, 2.2));
+const k = new THREE.DirectionalLight(0xffffff, 3.0); k.position.set(2.4, 3.6, 2.8); scene.add(k);
+const f = new THREE.DirectionalLight(0x9db9ff, 1.8); f.position.set(-2.6, 1.8, 1.2); scene.add(f);
+const r = new THREE.DirectionalLight(0xffc08a, 2.0); r.position.set(-1.0, 2.2, -3.0); scene.add(r);
+scene.add(new THREE.Mesh(
+  new THREE.CircleGeometry(20, 64).rotateX(-Math.PI / 2),
+  new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 1 })
+));
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.01, 200);
+const hud = document.getElementById('hud');
+const loader = new GLTFLoader();
+
+const gltf = await loader.loadAsync(MODEL);
+const model = gltf.scene;
+const box = new THREE.Box3().setFromObject(model);
+const size = box.getSize(new THREE.Vector3());
+const center = box.getCenter(new THREE.Vector3());
+model.position.set(-center.x, -box.min.y, -center.z);
+scene.add(model);
+
+let mixer = null, clipName = '(bind)';
+if (CLIP) {
+  const clipGltf = await loader.loadAsync(CLIP);
+  const clip = clipGltf.animations[0];
+  if (clip) {
+    mixer = new THREE.AnimationMixer(model);
+    const a = mixer.clipAction(clip);
+    a.play(); a.time = T;
+    mixer.update(0);
+    clipName = `${CLIP.split('/').pop()}  ${clip.duration.toFixed(2)}s  tracks ${clip.tracks.length}`;
+  }
+}
+
+const h = size.y;
+const dist = ((h * 0.55) / Math.tan((camera.fov * Math.PI / 180) / 2)) / ZOOM;
+const yaw = YAW * Math.PI / 180;
+camera.position.set(Math.sin(yaw) * dist, h * 0.55, Math.cos(yaw) * dist);
+camera.lookAt(0, h * 0.52, 0);
+
+let bones = 0;
+model.traverse((o) => { if (o.isBone) bones++; });
+const sample = [];
+model.traverse((o) => { if (o.isBone && sample.length < 4) sample.push(o.name); });
+
+hud.textContent =
+  `模型: ${MODEL.split('/').pop()}   高 ${size.y.toFixed(2)} m   骨骼 ${bones}\n` +
+  `动作: ${clipName}\n` +
+  `骨骼名示例: ${sample.join(', ')}`;
+window.__ready = true;
+
+function frame() { requestAnimationFrame(frame); renderer.render(scene, camera); }
+frame();
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+</script>
+</body>
+</html>

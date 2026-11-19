@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>打击点分析（手速峰值）</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">analyzing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { retargetClip } from '../src/asset-adapter.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/player/Heavy_3.glb';
+const TARGET_FRAMES = parseFloat(QS.get('frames') || '0');   // 想压成的总帧数（用于换算）
+
+const loader = new GLTFLoader();
+const model = (await loader.loadAsync(MODEL)).scene;
+const g = await loader.loadAsync(CLIPURL);
+const clip = retargetClip(model, g.scene, g.animations[0], {});
+
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const HAND = B['mixamorigRightHand'];
+const HIPS = B['mixamorigHips'];
+
+const N = 96, dur = clip.duration;
+const speeds = [];
+let prev = null;
+for (let i = 0; i <= N; i++) {
+  const t = (i / N) * dur;
+  mixer.setTime(t);
+  model.updateMatrixWorld(true);
+  const hp = HAND.getWorldPosition(new THREE.Vector3());
+  const hip = HIPS.getWorldPosition(new THREE.Vector3());
+  const rel = hp.clone().sub(hip);
+  if (prev) speeds.push({ t, v: rel.distanceTo(prev) / (dur / N) });
+  prev = rel;
+}
+
+// 找峰值（手相对髋的速度最大处 = 挥砍最快的一瞬）
+let peak = speeds[0];
+for (const s of speeds) if (s.v > peak.v) peak = s;
+
+const norm = peak.t / dur;
+const out = {
+  clip: CLIPURL.split('/').pop(),
+  dur: +dur.toFixed(2),
+  peakTime: +peak.t.toFixed(3),
+  peakNorm: +norm.toFixed(3),
+  peakSpeed: +peak.v.toFixed(2),
+  peakIn60fFrames: +(norm * (TARGET_FRAMES || dur * 60)).toFixed(1),
+  timeline: speeds.filter((_, i) => i % 6 === 0).map((s) => `${s.t.toFixed(2)}s:${s.v.toFixed(1)}`),
+};
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>腿部收拢探测</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">probing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/Walking_Backwards_1.glb';
+// 施加旋转的骨骼对：leg = 小腿(Leg) / upLeg = 大腿(UpLeg)
+const PAIR = QS.get('pair') || 'leg';
+const AXIS = (QS.get('axis') || 'z').toLowerCase();
+const DEG = parseFloat(QS.get('deg') || '0');
+const COMPOSE = QS.get('compose') || 'post';
+const FEET = (QS.get('feet') || '0') === '1';   // 是否给脚掌反向补偿
+
+const loader = new GLTFLoader();
+const gltf = await loader.loadAsync(MODEL);
+const model = gltf.scene;
+const clipGltf = await loader.loadAsync(CLIPURL);
+const clip = clipGltf.animations[0];
+
+const mixer = new THREE.AnimationMixer(model);
+const action = mixer.clipAction(clip);
+action.play();
+
+const bones = {};
+model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
+
+const pairNames = PAIR === 'leg'
+  ? ['mixamorigLeftLeg', 'mixamorigRightLeg']
+  : ['mixamorigLeftUpLeg', 'mixamorigRightUpLeg'];
+const B1 = bones[pairNames[0]], B2 = bones[pairNames[1]];
+const K1 = bones['mixamorigLeftLeg'], K2 = bones['mixamorigRightLeg'];   // 膝（小腿骨 head）
+const F1 = bones['mixamorigLeftFoot'], F2 = bones['mixamorigRightFoot'];
+const FTL = bones['mixamorigLeftFoot'], FTR = bones['mixamorigRightFoot'];
+const HEAD = bones['mixamorigHead'], HIPS = bones['mixamorigHips'];
+
+const AX = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) }[AXIS] || new THREE.Vector3(0, 0, 1);
+const qA = new THREE.Quaternion().setFromAxisAngle(AX, THREE.MathUtils.degToRad(DEG));
+const qB = new THREE.Quaternion().setFromAxisAngle(AX, THREE.MathUtils.degToRad(-DEG));
+const qFA = new THREE.Quaternion().setFromAxisAngle(AX, THREE.MathUtils.degToRad(-DEG * 0.6));
+const qFB = new THREE.Quaternion().setFromAxisAngle(AX, THREE.MathUtils.degToRad(DEG * 0.6));
+
+const N = 24, dur = clip.duration;
+const acc = { knee: 0, foot: 0, knee2: 0, foot2: 0, head: 0, head2: 0, hipsDy: 0 };
+const v = () => new THREE.Vector3();
+
+for (let i = 0; i < N; i++) {
+  const t = (i / N) * dur;
+  mixer.setTime(t);
+  model.updateMatrixWorld(true);
+  const k1 = K1.getWorldPosition(v()), k2 = K2.getWorldPosition(v());
+  const f1 = F1.getWorldPosition(v()), f2 = F2.getWorldPosition(v());
+  const hd = HEAD.getWorldPosition(v());
+  acc.knee += Math.abs(k1.x - k2.x);
+  acc.foot += Math.abs(f1.x - f2.x);
+  acc.head += hd.y;
+
+  if (DEG !== 0) {
+    if (COMPOSE === 'post') { B1.quaternion.multiply(qA); B2.quaternion.multiply(qB); }
+    else { B1.quaternion.premultiply(qA); B2.quaternion.premultiply(qB); }
+    if (FEET) {
+      FTL.quaternion.multiply(qFA);
+      FTR.quaternion.multiply(qFB);
+    }
+    model.updateMatrixWorld(true);
+    const k1b = K1.getWorldPosition(v()), k2b = K2.getWorldPosition(v());
+    const f1b = F1.getWorldPosition(v()), f2b = F2.getWorldPosition(v());
+    const hdb = HEAD.getWorldPosition(v());
+    acc.knee2 += Math.abs(k1b.x - k2b.x);
+    acc.foot2 += Math.abs(f1b.x - f2b.x);
+    acc.head2 += hdb.y;
+  }
+}
+
+const r = (x) => +(x / N).toFixed(4);
+const out = {
+  pair: PAIR, axis: AXIS, deg: DEG, compose: COMPOSE, feet: FEET,
+  knee: r(acc.knee), foot: r(acc.foot),
+  knee2: DEG ? r(acc.knee2) : null,
+  foot2: DEG ? r(acc.foot2) : null,
+  headY: r(acc.head), headY2: DEG ? r(acc.head2) : null,
+  dur: +dur.toFixed(2),
+};
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>

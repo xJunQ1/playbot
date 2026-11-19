@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>腿部姿态探测（大腿+小腿）</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a1d24;overflow:hidden}
+  canvas{display:block}
+  #hud{position:absolute;left:12px;top:10px;color:#9fb0c4;font:12px/1.6 ui-monospace,Consolas,monospace;white-space:pre;text-shadow:0 1px 3px #000}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">probing…</div>
+<script type="importmap">
+{ "imports": { "three": "../node_modules/three/build/three.module.js",
+               "three/addons/": "../node_modules/three/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const QS = new URLSearchParams(location.search);
+const MODEL = QS.get('model') || '../assets/player/player.glb';
+const CLIPURL = QS.get('clip') || '../assets/Walking_Backwards_1.glb';
+const UP = parseFloat(QS.get('up') || '0');     // 大腿内收角度
+const CALF = parseFloat(QS.get('calf') || '0'); // 小腿内收角度
+const FOOT = parseFloat(QS.get('foot') || '0'); // 脚掌反向补偿角度
+
+const loader = new GLTFLoader();
+const gltf = await loader.loadAsync(MODEL);
+const model = gltf.scene;
+const clipGltf = await loader.loadAsync(CLIPURL);
+const clip = clipGltf.animations[0];
+
+const mixer = new THREE.AnimationMixer(model);
+mixer.clipAction(clip).play();
+
+const B = {};
+model.traverse((o) => { if (o.isBone) B[o.name] = o; });
+const UL = B['mixamorigLeftUpLeg'], UR = B['mixamorigRightUpLeg'];
+const CL = B['mixamorigLeftLeg'], CR = B['mixamorigRightLeg'];
+const FL = B['mixamorigLeftFoot'], FR = B['mixamorigRightFoot'];
+const HEAD = B['mixamorigHead'];
+
+const Z = new THREE.Vector3(0, 0, 1);
+const q = (deg) => new THREE.Quaternion().setFromAxisAngle(Z, THREE.MathUtils.degToRad(deg));
+
+const N = 24, dur = clip.duration;
+const acc = { knee: 0, foot: 0, splay: 0, headY: 0, strideMax: 0, travelL: 0, travelR: 0 };
+const acc2 = { knee: 0, foot: 0, splay: 0, headY: 0, strideMax: 0 };
+const v3 = () => new THREE.Vector3();
+
+function splayDeg(hipL, hipR, footL, footR) {
+  // 正面投影下，两条腿（髋→脚）的夹角
+  const a = new THREE.Vector2(footL.x - hipL.x, footL.y - hipL.y);
+  const b = new THREE.Vector2(footR.x - hipR.x, footR.y - hipR.y);
+  if (a.length() < 1e-4 || b.length() < 1e-4) return 0;
+  const cos = THREE.MathUtils.clamp(a.normalize().dot(b.normalize()), -1, 1);
+  return THREE.MathUtils.radToDeg(Math.acos(cos));
+}
+
+for (let i = 0; i < N; i++) {
+  const t = (i / N) * dur;
+  mixer.setTime(t);
+  model.updateMatrixWorld(true);
+
+  const hipL = UL.getWorldPosition(v3()), hipR = UR.getWorldPosition(v3());
+  const hipsW = B['mixamorigHips'].getWorldPosition(v3());
+  const kL = CL.getWorldPosition(v3()), kR = CR.getWorldPosition(v3());
+  const fL = FL.getWorldPosition(v3()), fR = FR.getWorldPosition(v3());
+  const hd = HEAD.getWorldPosition(v3());
+  acc.knee += Math.abs(kL.x - kR.x);
+  acc.foot += Math.abs(fL.x - fR.x);
+  acc.splay += splayDeg(hipL, hipR, fL, fR);
+  acc.headY += hd.y;
+  acc.strideMax = Math.max(acc.strideMax, Math.abs((fL.z - hipsW.z) - (fR.z - hipsW.z)));
+  const lz = fL.z - hipsW.z, rz = fR.z - hipsW.z;
+  if (!acc._lz) { acc._lz = [lz, lz]; acc._rz = [rz, rz]; }
+  acc._lz = [Math.min(acc._lz[0], lz), Math.max(acc._lz[1], lz)];
+  acc._rz = [Math.min(acc._rz[0], rz), Math.max(acc._rz[1], rz)];
+
+  if (UP) { UL.quaternion.multiply(q(-UP)); UR.quaternion.multiply(q(UP)); }
+  if (CALF) { CL.quaternion.multiply(q(-CALF)); CR.quaternion.multiply(q(CALF)); }
+  if (FOOT) { FL.quaternion.multiply(q(FOOT)); FR.quaternion.multiply(q(-FOOT)); }
+  model.updateMatrixWorld(true);
+
+  const kL2 = CL.getWorldPosition(v3()), kR2 = CR.getWorldPosition(v3());
+  const fL2 = FL.getWorldPosition(v3()), fR2 = FR.getWorldPosition(v3());
+  const hd2 = HEAD.getWorldPosition(v3());
+  acc2.knee += Math.abs(kL2.x - kR2.x);
+  acc2.foot += Math.abs(fL2.x - fR2.x);
+  acc2.splay += splayDeg(hipL, hipR, fL2, fR2);
+  acc2.strideMax = Math.max(acc2.strideMax, Math.abs(fL2.z - fR2.z));
+  acc2.headY += hd2.y;
+}
+
+acc.travelL = acc._lz ? acc._lz[1] - acc._lz[0] : 0;
+acc.travelR = acc._rz ? acc._rz[1] - acc._rz[0] : 0;
+delete acc._lz; delete acc._rz;
+const r = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith('stride') && !k.startsWith('travel')).map(([k, v]) => [k, +(v / N).toFixed(4)]));
+const raw = (o) => ({ strideMax: +o.strideMax.toFixed(4), travelL: +o.travelL.toFixed(4), travelR: +o.travelR.toFixed(4) });
+const out = { up: UP, calf: CALF, foot: FOOT, base: { ...r(acc), ...raw(acc) }, adj: { ...r(acc2), strideMax: +acc2.strideMax.toFixed(4) }, dur: +dur.toFixed(2) };
+document.getElementById('hud').textContent = JSON.stringify(out, null, 1);
+window.__ready = true;
+window.__result = out;
+</script>
+</body>
+</html>
