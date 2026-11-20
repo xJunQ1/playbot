@@ -103,7 +103,7 @@
 <body>
 <div id="hud"></div>
 <div id="help">
-  <b>WASD</b> 移动 &nbsp; <b>Shift/Space</b> 翻滚 &nbsp; <b>J</b> 轻击 &nbsp; <b>K</b> 重击 &nbsp; <b>L</b> 格挡/弹反 &nbsp; <b>右键</b> 锁定<br>
+  <b>WASD</b> 移动 &nbsp; <b>Shift/Space</b> 翻滚 &nbsp; <b>左键</b> 轻击 &nbsp; <b>F</b> 重击 &nbsp; <b>右键</b> 格挡/弹反 &nbsp; <b>中键</b> 锁定<br>点击战斗画面捕获鼠标 · 移动鼠标转动视角 · <b>Esc</b> 设置<br>
   <b>F1</b> 判定框 &nbsp; <b>F2</b> 慢放0.25x &nbsp; <b>F3</b> 暂停 &nbsp; <b>R</b> 重开 &nbsp; <b>P</b> 导出帧表JSON
 </div>
 <div id="banner"></div>
@@ -161,7 +161,10 @@
         <div class="row"><label>雾浓度</label>
           <input id="setFog" type="range" min="0" max="1" step="0.05"><span class="val" id="setFogVal"></span>
         </div>
-        <div class="row"><label>视场角 FOV</label>
+        <div class="row"><label for="setSensitivity">鼠标视角灵敏度</label>
+          <input id="setSensitivity" type="range" min="0.2" max="3" step="0.1"><span class="val" id="setSensitivityVal"></span>
+        </div>
+        <div class="row"><label for="setFov">视场角 FOV</label>
           <input id="setFov" type="range" min="30" max="80" step="1"><span class="val" id="setFovVal"></span>
         </div>
         <div class="row"><label>显示 FPS</label>

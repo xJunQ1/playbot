@@ -11,7 +11,8 @@ const DEFAULTS = {
   shadow: true,
   decor: true,
   dpr: 2,
-  fov: 35,
+  fov: 60,
+  sensitivity: 1,
   fps: true,
   sharp: 0.35,
   ss: 1.5,
@@ -31,22 +32,22 @@ export function createSettings(ctx) {
 
   // 设置表结构版本：v2 = 超采样 1.5x；v3 = FOV 默认 35；v4 = 环境光遮蔽默认关。
   // 老存档（没有 v 字段）里这几个键会丢掉，让新版默认值生效，其它个人项（体积、键位等）保留。
-  const SCHEMA = 4;
+  const SCHEMA = 5;
   const RESET_ON_MIGRATE = ['ss', 'ao', 'aa', 'fov'];
 
   let state = Object.assign({}, DEFAULTS, (() => {
     try {
       const raw = JSON.parse(localStorage.getItem(KEY) || 'null');
       if (!raw || typeof raw !== 'object') return {};
-      if (Number(raw.v || 1) >= SCHEMA) return raw;
+      if (Number(raw.v || 1) >= 4) return raw;
       const rest = { ...raw };
       for (const k of RESET_ON_MIGRATE) delete rest[k];
       delete rest.v;
-      console.log('[settings] 旧存档迁移：超采样/AO/抗锯齿/FOV 回落到新版默认值');
-      console.log('[settings] 当前默认：超采样 1.5x / AO 高 / SMAA / FOV 35');
       return rest;
     } catch { return {}; }
   })());
+  if (state.v === 4 && state.fov === 35) state.fov = DEFAULTS.fov;
+  state.sensitivity = Math.min(3, Math.max(0.2, Number(state.sensitivity) || 1));
   // URL 覆盖（方便 A/B 截图）：?sharp=0.6&ss=1.5&res=1.25
   (function applyUrlOverrides() {
     const q = new URLSearchParams(location.search);
@@ -134,7 +135,9 @@ export function createSettings(ctx) {
     if (de) de.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === '1') === state.decor));
     const dpr = $('setDpr'); if (dpr) dpr.value = String(state.dpr);
     const fov = $('setFov');
-    if (fov) { fov.value = state.fov; const v = $('setFovVal'); if (v) v.textContent = state.fov + ' deg'; }
+    if (fov) { fov.value = state.fov; const v = $('setFovVal'); if (v) v.textContent = state.fov + '°'; }
+    $('setSensitivity').value = state.sensitivity;
+    $('setSensitivityVal').textContent = state.sensitivity.toFixed(1) + '×';
     const fps = $('setFps');
     if (fps) fps.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === '1') === state.fps));
 
@@ -181,12 +184,13 @@ export function createSettings(ctx) {
   // ── 按键重绑定 ────────────────────────────────────────────
   const KEY_LABELS = {
     fwd: '前进', back: '后退', left: '左移', right: '右移',
-    roll: '翻滚', light: '轻击', heavy: '重击', block: '格挡',
+    roll: '翻滚', light: '轻击', heavy: '重击', block: '格挡', lock: '锁定目标',
   };
   let recording = null;    // 正在录制的动作名
 
   function keyName(code) {
     if (!code) return '—';
+    if (code.startsWith('Mouse')) return ['鼠标左键', '鼠标中键', '鼠标右键'][Number(code.slice(5))] || code;
     return code
       .replace(/^Key/, '')
       .replace(/^Arrow/, '↑↓←→'.slice(0, 0) + 'Arrow ')
@@ -222,22 +226,25 @@ export function createSettings(ctx) {
   }
 
   function bindRecording() {
-    addEventListener('keydown', (e) => {
+    function record(e) {
       if (!recording) return;
       e.preventDefault();
-      e.stopPropagation();
-      if (e.code === 'Escape') { recording = null; window.__recordingKey = false; renderKeys(); return; }
+      e.stopImmediatePropagation();
+      const code = e.type === 'keydown' ? e.code : 'Mouse' + e.button;
+      if (code === 'Escape') { recording = null; window.__recordingKey = false; renderKeys(); return; }
       const action = recording;
       // 同一个键先从其它动作里摘掉
       for (const [a, codes] of Object.entries(keymap)) {
-        if (a !== action && codes.includes(e.code)) keymap[a] = codes.filter((c) => c !== e.code);
+        if (a !== action && codes.includes(code)) keymap[a] = codes.filter((c) => c !== code);
       }
-      keymap[action] = [e.code];
+      keymap[action] = [code];
       recording = null;
       window.__recordingKey = false;
       if (onKeymapChange) onKeymapChange();
       renderKeys();
-    }, true);
+    }
+    for (const event of ['keydown', 'click', 'auxclick']) addEventListener(event, record, true);
+    $('settings').addEventListener('contextmenu', e => { if (recording) e.preventDefault(); });
   }
   // ── 复制启动命令（硬件选择 / 解锁垂直同步都由浏览器进程决定，页面内改不了）──
   function copyText(text, label) {
@@ -315,15 +322,20 @@ export function createSettings(ctx) {
   let liveTimer = null;
   function setOpen(open) {
     const el = $('settings');
-    if (!el) return;
+    if (!el || el.classList.contains('open') === open) return;
     el.classList.toggle('open', open);
     if (open) {
+      ctx.onOpen();
+      if (document.pointerLockElement) document.exitPointerLock();
       pausedBefore = CFG.paused;
       CFG.paused = true;
       apply();
       // 面板打开期间每秒刷新 GPU / FPS / 刷新模式读数
       if (!liveTimer) liveTimer = setInterval(syncUi, 1000);
     } else {
+      recording = null;
+      window.__recordingKey = false;
+      renderKeys();
       CFG.paused = pausedBefore;
       if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     }
@@ -378,7 +390,17 @@ export function createSettings(ctx) {
     const dpr = $('setDpr');
     if (dpr) dpr.addEventListener('change', (e) => { state.dpr = parseFloat(e.target.value); apply(); });
     const fov = $('setFov');
-    if (fov) fov.addEventListener('input', (e) => { state.fov = parseFloat(e.target.value); apply(); });
+    if (fov) fov.addEventListener('input', (e) => {
+      camera.fov = state.fov = clampFov(e.target.value);
+      camera.updateProjectionMatrix();
+      syncUi();
+      save();
+    });
+    $('setSensitivity').addEventListener('input', e => {
+      state.sensitivity = Number(e.target.value);
+      syncUi();
+      save();
+    });
 
     addEventListener('keydown', (e) => {
       if (e.key === 'Escape') setOpen(!el.classList.contains('open'));

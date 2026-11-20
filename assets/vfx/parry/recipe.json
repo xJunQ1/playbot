@@ -1,0 +1,933 @@
+{
+ "format": "xsxb-parry",
+ "version": 1,
+ "generator": "XSXB-Slash 格挡",
+ "units": {
+  "length": "m",
+  "time": "s",
+  "color": "linear RGB, HDR multipliers separate"
+ },
+ "seed": 309388,
+ "tier": "perfect",
+ "manualSplit": true,
+ "frame": {
+  "note": "local frame of the effect: origin = clash point, +Y = world up. bladeA = left defender, bladeB = right attacker (unit vectors, from hilt towards the clash point). Rotate the whole frame so bladeA/bladeB match your weapons.",
+  "pose": "cross",
+  "bladeA": [
+   0.5507,
+   0.8211,
+   -0.1502
+  ],
+  "bladeB": [
+   -0.5698,
+   0.8098,
+   0.14
+  ],
+  "edgeA": [
+   0.7917,
+   -0.5708,
+   -0.2177
+  ],
+  "sprayMain": [
+   0.3996,
+   0.9114,
+   0.0985
+  ],
+  "spraySecondary": [
+   -0.6813,
+   0.519,
+   0.5162
+  ],
+  "floorY": -1.1
+ },
+ "clash": {
+  "hitstopS": 0.085,
+  "tremor": 1.25,
+  "shake": 1.2,
+  "tremorHz": 44
+ },
+ "star": {
+  "enabled": true,
+  "texture": "textures/star.png",
+  "core": [
+   1,
+   1,
+   1
+  ],
+  "edge": [
+   1,
+   0.4452,
+   0.10702
+  ],
+  "hdr": 26,
+  "sizeM": 1.12,
+  "lifeS": 0.135,
+  "contrastPow": 2.49,
+  "curve": "gain = hdr * smoothstep(0,0.012,t) * exp(-t/(life*0.38)); size = sizeM*(0.5+0.5*smoothstep(0,0.02,t))*(1+0.35*t/life); camera facing, additive, no depth test",
+  "glow": {
+   "amount": 0.48,
+   "sizeMul": 2.5047,
+   "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+  },
+  "light": {
+   "enabled": true,
+   "intensity": 22,
+   "rangeM": 7.5,
+   "decayS": 0.095,
+   "color": [
+    1,
+    0.43415,
+    0.11697
+   ]
+  }
+ },
+ "light": {
+  "enabled": true,
+  "color": [
+   1,
+   0.43415,
+   0.11697
+  ],
+  "intensity": 22,
+  "rangeM": 7.5,
+  "decayS": 0.095,
+  "offsetTowardsCamM": 0.18,
+  "glow": {
+   "amount": 0.48,
+   "sizeMul": 1.15,
+   "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+  }
+ },
+ "flash": {
+  "enabled": true,
+  "style": "sphere",
+  "texture": "textures/flash.png",
+  "core": [
+   1,
+   0.94731,
+   0.83077
+  ],
+  "color": [
+   1,
+   0.47932,
+   0.10702
+  ],
+  "sizeM": 1.28,
+  "opacity": 0.74,
+  "blur": 0.26,
+  "hdr": 11.5,
+  "lifeS": 0.155,
+  "expand": 0.62,
+  "hollow": 0,
+  "rings": 4,
+  "spin": 0,
+  "seed": 985086,
+  "curve": "fade = smoothstep(0,0.008,t) * (1 - t/(1.75*life))^1.35; scale = sizeM * lerp(max(0.2,1-0.55*expand), 1+0.45*expand, 1-exp(-t/max(0.014,0.42*life))); premultiplied circular billboard (One, OneMinusSrcAlpha), no depth test"
+ },
+ "sparks": {
+  "enabled": true,
+  "texture": "textures/spark.png",
+  "style": "burst",
+  "hot": [
+   1,
+   0.89627,
+   0.71569
+  ],
+  "mid": [
+   1,
+   0.45079,
+   0.06301
+  ],
+  "cool": [
+   0.67244,
+   0.04231,
+   0.00857
+  ],
+  "hdr": 14.2,
+  "gravity": 14,
+  "floorBounce": 0.45,
+  "lobes": [
+   {
+    "axis": "any (upper-biased sphere)",
+    "share": 1,
+    "coneMul": 1
+   }
+  ],
+  "tiers": [
+   {
+    "name": "burst",
+    "count": 105,
+    "speed": [
+     3.3600000000000003,
+     21.28
+    ],
+    "drag": [
+     6.510000000000001,
+     15.81
+    ],
+    "life": [
+     0.07840000000000001,
+     0.24640000000000004
+    ],
+    "gravity": 0.25,
+    "width": [
+     0.0009,
+     0.002
+    ],
+    "streak": 0.0378,
+    "maxLen": 0.525,
+    "cone": 59.8,
+    "heat": [
+     1,
+     1
+    ],
+    "cool": [
+     0.12,
+     0.22
+    ],
+    "clip": 0,
+    "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+   },
+   {
+    "name": "arc",
+    "count": 180,
+    "speed": [
+     1.7920000000000003,
+     7.6160000000000005
+    ],
+    "drag": [
+     0.8370000000000001,
+     2.232
+    ],
+    "life": [
+     0.8960000000000001,
+     1.9040000000000001
+    ],
+    "gravity": 1,
+    "width": [
+     0.0011,
+     0.002
+    ],
+    "streak": 0.033600000000000005,
+    "maxLen": 0.441,
+    "cone": 52,
+    "heat": [
+     0.85,
+     1
+    ],
+    "cool": [
+     0.6,
+     1.25
+    ],
+    "clip": 0,
+    "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+   },
+   {
+    "name": "ember",
+    "count": 64,
+    "speed": [
+     0.672,
+     3.8080000000000003
+    ],
+    "drag": [
+     2.325,
+     4.65
+    ],
+    "life": [
+     0.784,
+     1.7920000000000003
+    ],
+    "gravity": 0.3,
+    "width": [
+     0.0016,
+     0.003
+    ],
+    "streak": 0.006,
+    "maxLen": 0.035,
+    "cone": 88,
+    "heat": [
+     0.9,
+     1
+    ],
+    "cool": [
+     0.45,
+     1.1
+    ],
+    "clip": 0.3333,
+    "render": "camera-facing speck, alpha clip 0.3333"
+   }
+  ],
+  "heat": "h = heat*exp(-age/cool); colour ramp hot (h>0.7) -> mid (0.32..0.7) -> cool -> black; emissive = hdr*h^2.2 + 2.6*h"
+ },
+ "ribbon": {
+  "enabled": true,
+  "style": "sphereScatter",
+  "leaders": 12,
+  "widthM": 0.0076,
+  "trailS": 0.26,
+  "hdr": 18,
+  "color": [
+   1,
+   0.51492,
+   0.15593
+  ],
+  "sphereRadiusM": 0.34,
+  "sphereConeDeg": 48,
+  "sphereOffset": [
+   -0.3947,
+   -0.012,
+   0.008
+  ],
+  "leaderRule": "6 flight styles: whip | sphereScatter (invisible diverging sphere scattering rays radially across sphereConeDeg behind left defender) | bladeSlide | deflectCone | vortexWrap | groundSkim"
+ },
+ "smoke": {
+  "enabled": true,
+  "style": "ink",
+  "texture": "textures/smoke.png",
+  "color": [
+   0.00152,
+   0.00152,
+   0.00212
+  ],
+  "opacity": 0.78,
+  "sizeMul": 0.91,
+  "lifeMul": 0.92,
+  "puffs": 10,
+  "darkSparks": 32,
+  "blend": "alpha (translucent), dissolve threshold 0.12 -> 0.95 over life"
+ },
+ "debris": {
+  "enabled": true,
+  "count": 26,
+  "sizeMul": 1.07,
+  "speedMul": 1.04,
+  "sizeM": [
+   0.004,
+   0.011
+  ],
+  "speedMS": [
+   1.2,
+   4.8
+  ],
+  "floorBounce": 0.32,
+  "material": "dark metal, lit"
+ },
+ "refraction": {
+  "enabled": true,
+  "style": "ring",
+  "texture": null,
+  "strengthPx720": 30,
+  "radiusM": 1.45,
+  "lifeS": 0.33,
+  "note": "screen-space UV offset only, never adds colour"
+ },
+ "sfx": {
+  "enabled": true,
+  "grade": 4,
+  "label": "#4 打刀脆响咬合",
+  "weight": 0.86,
+  "resonance": 0.82,
+  "file": "audio/parry_perfect.wav",
+  "peakOffsetS": 0.1396,
+  "durationS": 1.8333,
+  "sampleRate": 48000,
+  "syncRule": "start playback at T_clash - peakOffsetS (or seek to peakOffsetS on instant zero-lead trigger) so acoustic peak hits at exact T0"
+ },
+ "tiers": {
+  "normal": {
+   "seed": 309388,
+   "clash": {
+    "hitstopS": 0.065,
+    "tremor": 0.95,
+    "shake": 0.8,
+    "tremorHz": 44
+   },
+   "star": {
+    "enabled": true,
+    "texture": "textures/star_normal.png",
+    "core": [
+     1,
+     1,
+     1
+    ],
+    "edge": [
+     1,
+     0.4452,
+     0.10702
+    ],
+    "hdr": 22,
+    "sizeM": 0.85,
+    "lifeS": 0.11,
+    "contrastPow": 2.49,
+    "curve": "gain = hdr * smoothstep(0,0.012,t) * exp(-t/(life*0.38)); size = sizeM*(0.5+0.5*smoothstep(0,0.02,t))*(1+0.35*t/life); camera facing, additive, no depth test",
+    "glow": {
+     "amount": 0.28,
+     "sizeMul": 1.8601,
+     "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+    },
+    "light": {
+     "enabled": true,
+     "intensity": 14,
+     "rangeM": 6,
+     "decayS": 0.075,
+     "color": [
+      1,
+      0.43415,
+      0.11697
+     ]
+    }
+   },
+   "light": {
+    "enabled": true,
+    "color": [
+     1,
+     0.43415,
+     0.11697
+    ],
+    "intensity": 14,
+    "rangeM": 6,
+    "decayS": 0.075,
+    "offsetTowardsCamM": 0.18,
+    "glow": {
+     "amount": 0.28,
+     "sizeMul": 0.95,
+     "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+    }
+   },
+   "flash": {
+    "enabled": true,
+    "style": "sphere",
+    "texture": "textures/flash_normal.png",
+    "core": [
+     1,
+     0.94731,
+     0.83077
+    ],
+    "color": [
+     1,
+     0.47932,
+     0.10702
+    ],
+    "sizeM": 0.92,
+    "opacity": 0.55,
+    "blur": 0.3,
+    "hdr": 8.5,
+    "lifeS": 0.12,
+    "expand": 0.48,
+    "hollow": 0,
+    "rings": 3,
+    "spin": 0,
+    "seed": 985086,
+    "curve": "fade = smoothstep(0,0.008,t) * (1 - t/(1.75*life))^1.35; scale = sizeM * lerp(max(0.2,1-0.55*expand), 1+0.45*expand, 1-exp(-t/max(0.014,0.42*life))); premultiplied circular billboard (One, OneMinusSrcAlpha), no depth test"
+   },
+   "sparks": {
+    "enabled": true,
+    "texture": "textures/spark.png",
+    "style": "burst",
+    "hot": [
+     1,
+     0.89627,
+     0.71569
+    ],
+    "mid": [
+     1,
+     0.45079,
+     0.06301
+    ],
+    "cool": [
+     0.67244,
+     0.04231,
+     0.00857
+    ],
+    "hdr": 12,
+    "gravity": 14,
+    "floorBounce": 0.45,
+    "lobes": [
+     {
+      "axis": "any (upper-biased sphere)",
+      "share": 1,
+      "coneMul": 1
+     }
+    ],
+    "tiers": [
+     {
+      "name": "burst",
+      "count": 70,
+      "speed": [
+       3,
+       19
+      ],
+      "drag": [
+       6.510000000000001,
+       15.81
+      ],
+      "life": [
+       0.06860000000000001,
+       0.21559999999999999
+      ],
+      "gravity": 0.25,
+      "width": [
+       0.0009,
+       0.002
+      ],
+      "streak": 0.03312,
+      "maxLen": 0.46,
+      "cone": 59.8,
+      "heat": [
+       1,
+       1
+      ],
+      "cool": [
+       0.12,
+       0.22
+      ],
+      "clip": 0,
+      "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+     },
+     {
+      "name": "arc",
+      "count": 125,
+      "speed": [
+       1.6,
+       6.8
+      ],
+      "drag": [
+       0.8370000000000001,
+       2.232
+      ],
+      "life": [
+       0.784,
+       1.666
+      ],
+      "gravity": 1,
+      "width": [
+       0.0011,
+       0.002
+      ],
+      "streak": 0.02944,
+      "maxLen": 0.3864,
+      "cone": 52,
+      "heat": [
+       0.85,
+       1
+      ],
+      "cool": [
+       0.6,
+       1.25
+      ],
+      "clip": 0,
+      "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+     },
+     {
+      "name": "ember",
+      "count": 42,
+      "speed": [
+       0.6,
+       3.4
+      ],
+      "drag": [
+       2.325,
+       4.65
+      ],
+      "life": [
+       0.6859999999999999,
+       1.568
+      ],
+      "gravity": 0.3,
+      "width": [
+       0.0016,
+       0.003
+      ],
+      "streak": 0.006,
+      "maxLen": 0.035,
+      "cone": 88,
+      "heat": [
+       0.9,
+       1
+      ],
+      "cool": [
+       0.45,
+       1.1
+      ],
+      "clip": 0.3333,
+      "render": "camera-facing speck, alpha clip 0.3333"
+     }
+    ],
+    "heat": "h = heat*exp(-age/cool); colour ramp hot (h>0.7) -> mid (0.32..0.7) -> cool -> black; emissive = hdr*h^2.2 + 2.6*h"
+   },
+   "ribbon": {
+    "enabled": false,
+    "style": "sphereScatter",
+    "leaders": 8,
+    "widthM": 0.0059,
+    "trailS": 0.18,
+    "hdr": 13,
+    "color": [
+     1,
+     0.51492,
+     0.15593
+    ],
+    "sphereRadiusM": 0.34,
+    "sphereConeDeg": 48,
+    "sphereOffset": [
+     -0.3947,
+     -0.012,
+     0.008
+    ],
+    "leaderRule": "6 flight styles: whip | sphereScatter (invisible diverging sphere scattering rays radially across sphereConeDeg behind left defender) | bladeSlide | deflectCone | vortexWrap | groundSkim"
+   },
+   "smoke": {
+    "enabled": false,
+    "style": "wisp",
+    "texture": "textures/smoke.png",
+    "color": [
+     0.00152,
+     0.00152,
+     0.00212
+    ],
+    "opacity": 0.59,
+    "sizeMul": 0.75,
+    "lifeMul": 0.78,
+    "puffs": 6,
+    "darkSparks": 14,
+    "blend": "alpha (translucent), dissolve threshold 0.12 -> 0.95 over life"
+   },
+   "debris": {
+    "enabled": false,
+    "count": 11,
+    "sizeMul": 0.88,
+    "speedMul": 0.89,
+    "sizeM": [
+     0.004,
+     0.011
+    ],
+    "speedMS": [
+     1.2,
+     4.8
+    ],
+    "floorBounce": 0.32,
+    "material": "dark metal, lit"
+   },
+   "refraction": {
+    "enabled": false,
+    "style": "double",
+    "texture": null,
+    "strengthPx720": 19,
+    "radiusM": 0.97,
+    "lifeS": 0.27,
+    "note": "screen-space UV offset only, never adds colour"
+   },
+   "sfx": {
+    "enabled": true,
+    "grade": 3,
+    "label": "#3 佩刀亮刃交击",
+    "weight": 0.32,
+    "resonance": 0.24,
+    "file": "audio/parry_normal.wav",
+    "peakOffsetS": 0.106,
+    "durationS": 0.9627,
+    "sampleRate": 48000,
+    "syncRule": "start playback at T_clash - peakOffsetS (or seek to peakOffsetS on instant zero-lead trigger) so acoustic peak hits at exact T0"
+   }
+  },
+  "perfect": {
+   "seed": 309388,
+   "clash": {
+    "hitstopS": 0.085,
+    "tremor": 1.25,
+    "shake": 1.2,
+    "tremorHz": 44
+   },
+   "star": {
+    "enabled": true,
+    "texture": "textures/star.png",
+    "core": [
+     1,
+     1,
+     1
+    ],
+    "edge": [
+     1,
+     0.4452,
+     0.10702
+    ],
+    "hdr": 26,
+    "sizeM": 1.12,
+    "lifeS": 0.135,
+    "contrastPow": 2.49,
+    "curve": "gain = hdr * smoothstep(0,0.012,t) * exp(-t/(life*0.38)); size = sizeM*(0.5+0.5*smoothstep(0,0.02,t))*(1+0.35*t/life); camera facing, additive, no depth test",
+    "glow": {
+     "amount": 0.48,
+     "sizeMul": 2.5047,
+     "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+    },
+    "light": {
+     "enabled": true,
+     "intensity": 22,
+     "rangeM": 7.5,
+     "decayS": 0.095,
+     "color": [
+      1,
+      0.43415,
+      0.11697
+     ]
+    }
+   },
+   "light": {
+    "enabled": true,
+    "color": [
+     1,
+     0.43415,
+     0.11697
+    ],
+    "intensity": 22,
+    "rangeM": 7.5,
+    "decayS": 0.095,
+    "offsetTowardsCamM": 0.18,
+    "glow": {
+     "amount": 0.48,
+     "sizeMul": 1.15,
+     "gain": "(0.16+0.34*amount)*smoothstep(0,0.012,t)*exp(-t/(decayS*1.95))"
+    }
+   },
+   "flash": {
+    "enabled": true,
+    "style": "sphere",
+    "texture": "textures/flash.png",
+    "core": [
+     1,
+     0.94731,
+     0.83077
+    ],
+    "color": [
+     1,
+     0.47932,
+     0.10702
+    ],
+    "sizeM": 1.28,
+    "opacity": 0.74,
+    "blur": 0.26,
+    "hdr": 11.5,
+    "lifeS": 0.155,
+    "expand": 0.62,
+    "hollow": 0,
+    "rings": 4,
+    "spin": 0,
+    "seed": 985086,
+    "curve": "fade = smoothstep(0,0.008,t) * (1 - t/(1.75*life))^1.35; scale = sizeM * lerp(max(0.2,1-0.55*expand), 1+0.45*expand, 1-exp(-t/max(0.014,0.42*life))); premultiplied circular billboard (One, OneMinusSrcAlpha), no depth test"
+   },
+   "sparks": {
+    "enabled": true,
+    "texture": "textures/spark.png",
+    "style": "burst",
+    "hot": [
+     1,
+     0.89627,
+     0.71569
+    ],
+    "mid": [
+     1,
+     0.45079,
+     0.06301
+    ],
+    "cool": [
+     0.67244,
+     0.04231,
+     0.00857
+    ],
+    "hdr": 14.2,
+    "gravity": 14,
+    "floorBounce": 0.45,
+    "lobes": [
+     {
+      "axis": "any (upper-biased sphere)",
+      "share": 1,
+      "coneMul": 1
+     }
+    ],
+    "tiers": [
+     {
+      "name": "burst",
+      "count": 105,
+      "speed": [
+       3.3600000000000003,
+       21.28
+      ],
+      "drag": [
+       6.510000000000001,
+       15.81
+      ],
+      "life": [
+       0.07840000000000001,
+       0.24640000000000004
+      ],
+      "gravity": 0.25,
+      "width": [
+       0.0009,
+       0.002
+      ],
+      "streak": 0.0378,
+      "maxLen": 0.525,
+      "cone": 59.8,
+      "heat": [
+       1,
+       1
+      ],
+      "cool": [
+       0.12,
+       0.22
+      ],
+      "clip": 0,
+      "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+     },
+     {
+      "name": "arc",
+      "count": 180,
+      "speed": [
+       1.7920000000000003,
+       7.6160000000000005
+      ],
+      "drag": [
+       0.8370000000000001,
+       2.232
+      ],
+      "life": [
+       0.8960000000000001,
+       1.9040000000000001
+      ],
+      "gravity": 1,
+      "width": [
+       0.0011,
+       0.002
+      ],
+      "streak": 0.033600000000000005,
+      "maxLen": 0.441,
+      "cone": 52,
+      "heat": [
+       0.85,
+       1
+      ],
+      "cool": [
+       0.6,
+       1.25
+      ],
+      "clip": 0,
+      "render": "velocity-aligned streak, length = clamp(speed*streak, 0.012, maxLen)"
+     },
+     {
+      "name": "ember",
+      "count": 64,
+      "speed": [
+       0.672,
+       3.8080000000000003
+      ],
+      "drag": [
+       2.325,
+       4.65
+      ],
+      "life": [
+       0.784,
+       1.7920000000000003
+      ],
+      "gravity": 0.3,
+      "width": [
+       0.0016,
+       0.003
+      ],
+      "streak": 0.006,
+      "maxLen": 0.035,
+      "cone": 88,
+      "heat": [
+       0.9,
+       1
+      ],
+      "cool": [
+       0.45,
+       1.1
+      ],
+      "clip": 0.3333,
+      "render": "camera-facing speck, alpha clip 0.3333"
+     }
+    ],
+    "heat": "h = heat*exp(-age/cool); colour ramp hot (h>0.7) -> mid (0.32..0.7) -> cool -> black; emissive = hdr*h^2.2 + 2.6*h"
+   },
+   "ribbon": {
+    "enabled": true,
+    "style": "sphereScatter",
+    "leaders": 12,
+    "widthM": 0.0076,
+    "trailS": 0.26,
+    "hdr": 18,
+    "color": [
+     1,
+     0.51492,
+     0.15593
+    ],
+    "sphereRadiusM": 0.34,
+    "sphereConeDeg": 48,
+    "sphereOffset": [
+     -0.3947,
+     -0.012,
+     0.008
+    ],
+    "leaderRule": "6 flight styles: whip | sphereScatter (invisible diverging sphere scattering rays radially across sphereConeDeg behind left defender) | bladeSlide | deflectCone | vortexWrap | groundSkim"
+   },
+   "smoke": {
+    "enabled": true,
+    "style": "ink",
+    "texture": "textures/smoke.png",
+    "color": [
+     0.00152,
+     0.00152,
+     0.00212
+    ],
+    "opacity": 0.78,
+    "sizeMul": 0.91,
+    "lifeMul": 0.92,
+    "puffs": 10,
+    "darkSparks": 32,
+    "blend": "alpha (translucent), dissolve threshold 0.12 -> 0.95 over life"
+   },
+   "debris": {
+    "enabled": true,
+    "count": 26,
+    "sizeMul": 1.07,
+    "speedMul": 1.04,
+    "sizeM": [
+     0.004,
+     0.011
+    ],
+    "speedMS": [
+     1.2,
+     4.8
+    ],
+    "floorBounce": 0.32,
+    "material": "dark metal, lit"
+   },
+   "refraction": {
+    "enabled": true,
+    "style": "ring",
+    "texture": null,
+    "strengthPx720": 30,
+    "radiusM": 1.45,
+    "lifeS": 0.33,
+    "note": "screen-space UV offset only, never adds colour"
+   },
+   "sfx": {
+    "enabled": true,
+    "grade": 4,
+    "label": "#4 打刀脆响咬合",
+    "weight": 0.86,
+    "resonance": 0.82,
+    "file": "audio/parry_perfect.wav",
+    "peakOffsetS": 0.1396,
+    "durationS": 1.8333,
+    "sampleRate": 48000,
+    "syncRule": "start playback at T_clash - peakOffsetS (or seek to peakOffsetS on instant zero-lead trigger) so acoustic peak hits at exact T0"
+   }
+  }
+ },
+ "preview": {
+  "timeAfterClashS": 0.06
+ }
+}

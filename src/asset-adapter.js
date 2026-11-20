@@ -46,6 +46,7 @@ export const DEFAULT_CLIP_MAP = {
   move: 'Running',
   walk: 'Walking',            // Boss 踱步 / 绕圈时用
   roll: 'Dive_Roll',
+  backstep: 'BossBackstep',
   moveback: 'Backstep',
   block: 'Blocking',   // 格挡：直接用 格挡.fbx 原始动作（重新转换的 0.95s 版本）
   blockmove: 'BlockMove',
@@ -65,6 +66,45 @@ export const DEFAULT_CLIP_MAP = {
   b_slam: 'Great_Sword_Slash',
   b_charge: 'Standing_Dodge_Forward',
 };
+
+// Cache support points on the soles before animation starts. Keep the extreme
+// vertices at several slopes so heel strikes and toes can both carry weight.
+function collectSoleVertices(root) {
+  const patches = [];
+  const point = new THREE.Vector3();
+  root.updateWorldMatrix(true, false);
+  root.updateMatrixWorld(true);
+  root.traverse(mesh => {
+    if (!mesh.isSkinnedMesh) return;
+    const { position, skinIndex, skinWeight } = mesh.geometry.attributes;
+    const byBone = new Map();
+    mesh.skeleton.bones.forEach((bone, i) => {
+      if (/(?:foot|toebase)$/i.test(bone.name)) byBone.set(i, new Map());
+    });
+    if (!byBone.size) return;
+    const stride = Math.max(1, Math.floor(position.count / 60000));
+    for (let i = 0; i < position.count; i += stride) {
+      let joint = 0;
+      for (let j = 1; j < 4; j++) {
+        if (skinWeight.getComponent(i, j) > skinWeight.getComponent(i, joint)) joint = j;
+      }
+      const hull = byBone.get(skinIndex.getComponent(i, joint));
+      if (!hull) continue;
+      mesh.getVertexPosition(i, point).applyMatrix4(mesh.matrixWorld);
+      for (let x = -2; x <= 2; x++) {
+        for (let z = -2; z <= 2; z++) {
+          const key = 5 * x + z;
+          const score = point.y + x * point.x + z * point.z;
+          if (!hull.has(key) || score < hull.get(key).score) hull.set(key, { score, i });
+        }
+      }
+    }
+    const indices = new Set();
+    for (const hull of byBone.values()) for (const { i } of hull.values()) indices.add(i);
+    if (indices.size) patches.push({ mesh, indices });
+  });
+  return patches;
+}
 
 export class ModelBinder {
   /**
@@ -223,7 +263,7 @@ export class ModelBinder {
         // 攻击 / 翻滚：单次播放，不循环
         // 攻击/翻滚：单次播放，不循环（heavy2 / heavy3 / light4 也必须算进来，
         // 否则播到片段末尾会绕回第 0 帧，表现为「结尾重复一帧」）
-        const onceState = actor.state === 'roll' || actor.state === 'attack'
+        const onceState = actor.state === 'roll' || actor.state === 'attack' || actor.state === 'backstep'
           || /^light\d*$/.test(actor.state) || /^heavy\d*$/.test(actor.state);
         if (onceState) {
           next.setLoop(THREE.LoopOnce, 1);
@@ -263,8 +303,34 @@ export class ModelBinder {
       }
     }
 
+    if (actor.backstep && this.currentName === targetName) {
+      // The simulation frame drives both the planted step and the retreat.
+      this.current.paused = true;
+      this.current.time = this.current.getClip().duration * actor.frame / actor.backstep.frames;
+    }
     this.mixer.update(dt);
+    if (this.solePatches?.length) this.groundPose(actor, dt);
     if (this.gripEnabled !== false) applySwordGrip(this.root, 'Right');   // 握剑手：右手五指卷曲
+  }
+
+  groundPose(actor, dt) {
+    if (actor.state !== 'attack' && actor.state !== 'backstep') {
+      // Ease the visual offset out through the blend back into locomotion.
+      this.root.position.y = THREE.MathUtils.damp(this.root.position.y, this.restRootY, 24, dt);
+      return;
+    }
+    this.root.updateWorldMatrix(true, false);
+    this.root.updateMatrixWorld(true);
+    let lowest = Infinity;
+    for (const { mesh, indices } of this.solePatches) {
+      for (const index of indices) {
+        mesh.getVertexPosition(index, this.solePoint).applyMatrix4(mesh.matrixWorld);
+        lowest = Math.min(lowest, this.solePoint.y);
+      }
+    }
+    // Actor containers are unit scale and only rotate about Y. Move the
+    // visual root, keeping attack travel, hitboxes and the lifted foot intact.
+    this.root.position.y += this.root.parent.matrixWorld.elements[13] - lowest;
   }
 
   _clipKey(actor) {
@@ -1021,8 +1087,9 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
       // 后退片段里其实是「两步」(实测一个循环 ≈1.86s)；原片 2.55s，循环点在相位中间，
       // 一播到底会看到姿势跳一下 = 用户说的「重播」。这里精确切一个循环，首尾同相，循环无跳变。
       if (name === 'Backstep') {
+        // One step for the Boss; keep the full two-step loop for the player.
+        binder.clips.set('BossBackstep', sliceClip(clip, 0, 56, 60));
         clip = sliceClip(clip, 0, Math.round(clip.duration * 60 * (1.86 / 2.55)), 60);
-
       }
 
       // 轻击三连击：三段素材先离线拼成一条连贯动作（接缝处姿势本来就一致），
@@ -1390,6 +1457,11 @@ export async function bindModel(actor, url, opts = {}) {
   if (opts.targetHeight) binder.fitToHeight(opts.targetHeight);
   // FBX→GLB 的模型骨骼尺度可能和网格差很远，再按骨骼校一次（武器挂载之前）
   if (opts.boneFit) binder.fitToHeightBones(opts.targetHeight);
+  if (actor.isBoss) {
+    binder.restRootY = binder.root.position.y;
+    binder.solePoint = new THREE.Vector3();
+    binder.solePatches = collectSoleVertices(binder.root);
+  }
 
   // 武器是附加物：加载失败不能把整个 bindModel 拖挂 ——
   // 那样 Promise.all 会 reject，window.__dbg 都挂不上，整个 demo 停摆。

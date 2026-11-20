@@ -310,6 +310,8 @@ export function poseFor(actor, clock) {
     case 'idle':
     case 'move':
       return actor.state === 'move' ? poseMove(clock) : poseIdle(clock);
+    case 'backstep':
+      return poseMove(1 - 0.5 * actor.frame / actor.backstep.frames);
     case 'roll':
       return poseRoll(actor.frame, actor.rollTotal ?? 33);
     case 'block':

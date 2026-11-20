@@ -1,18 +1,19 @@
 // ─────────────────────────────────────────────────────────────
-//  近战武器特效 —— 纯 three.js 程序化实现，零外部资源
+//  近战武器特效 —— three.js 战斗特效
 //
 //  设计原则（和 frame-data.js 一致）：特效只是「判定帧的视觉回声」，
 //  不参与任何战斗逻辑，删掉整个文件游戏照样能跑。
 //
 //  · swingFromActor(actor, move)  刀光弧：判定帧第一帧开火，扫过 active 帧
 //  · hit(attacker, defender, hb)  命中火花 + 闪光（金属感，暖色）
-//  · guard(actor)                 格挡火花（冷色、量少、无冲击环）
-//  · parry(actor)                 弹反：白色闪光 + 冲击环 + 爆量火花
+//  · guard(actor)                 金色星芒与飞溅火星
+//  · parry(actor)                 弹反：强化星芒、拖尾、烟尘与折射
 //  · update(dt)                   真实秒推进；命中冻结时由调用方传 0 来冻住
 //
 //  调参：VFX_CFG 已挂到 lil-gui「近战特效」文件夹
 // ─────────────────────────────────────────────────────────────
 import * as THREE from 'three';
+import { GuardImpact } from './guard-impact.js';
 import { BladeTrail } from './blade-trail.js';
 import { guardFromAO } from './ao-guard.js';
 
@@ -230,6 +231,7 @@ export class MeleeVFX {
     this.scene = scene;
     this.getCamera = opts.getCamera ?? (() => null);
     this.effects = [];
+    this.guardImpact = new GuardImpact(scene);
     // 真实剑轨：玩家 / Boss 各一条，按「刃根→刃尖」逐帧采样
     this.trails = {
       player: new BladeTrail(scene, { life: VFX_CFG.trailLife, maxSamples: 72 }),
@@ -408,51 +410,17 @@ export class MeleeVFX {
     });
   }
 
-  // ── 格挡（普通）：冷色小火花，没有冲击环 ───────────────────
-  guard(actor) {
-    if (!VFX_CFG.enabled || !actor) return;
-    const p = this._shieldPoint(actor);
-    this._burst(p, {
-      size: 0.8 * (actor.scale ?? 1),
-      heavy: false,
-      dir: new THREE.Vector3(Math.sin(actor.yaw), 0.4, Math.cos(actor.yaw)),
-      color: 0xbfe6ff,
-      count: 10,
-    });
-    this._flash(p, { size: 0.8 * (actor.scale ?? 1), color: 0xd8f0ff, life: 0.07 });
+  guard(actor, attacker) {
+    this._clash(actor, attacker, 'normal');
   }
 
-  // ── 弹反：白闪 + 冲击环 + 爆量火花 ─────────────────────────
-  parry(actor) {
-    if (!VFX_CFG.enabled || !actor) return;
-    const scale = actor.scale ?? 1;
-    const p = this._shieldPoint(actor);
+  parry(actor, attacker) {
+    this._clash(actor, attacker, 'perfect');
+  }
 
-    this._flash(p, { size: 1.7 * scale, color: 0xffffff, life: 0.12 });
-    this._burst(p, {
-      size: 1.2 * scale,
-      heavy: true,
-      dir: new THREE.Vector3(Math.sin(actor.yaw), 0.35, Math.cos(actor.yaw)),
-      color: 0xfff6d8,
-      count: 30,
-    });
-    this._ring(p, {
-      scale,
-      normal: new THREE.Vector3(Math.sin(actor.yaw), 0.15, Math.cos(actor.yaw)).normalize(),
-      from: 0.18,
-      to: 1.35,
-      life: 0.20,
-      color: 0xffffff,
-    });
-    // 第二圈慢一点，做出「扩散」的层次
-    this._ring(p, {
-      scale,
-      normal: new THREE.Vector3(Math.sin(actor.yaw), 0.15, Math.cos(actor.yaw)).normalize(),
-      from: 0.12,
-      to: 0.9,
-      life: 0.30,
-      color: 0xffd9a0,
-    });
+  _clash(actor, attacker, tier) {
+    if (!actor || !VFX_CFG.enabled || VFX_CFG.intensity <= 0) return;
+    this.effects.push(this.guardImpact.burst(actor, tier, this.getCamera(), VFX_CFG.intensity, attacker));
   }
 
   // ── 生命周期 ───────────────────────────────────────────────
@@ -616,20 +584,12 @@ export class MeleeVFX {
 
   dispose() {
     this.clear();
+    this.guardImpact.dispose();
   }
 
   // ── 内部构件 ───────────────────────────────────────────────
   _drop(obj) {
     this.scene.remove(obj);
-  }
-
-  _shieldPoint(actor) {
-    const scale = actor.scale ?? 1;
-    return new THREE.Vector3(
-      actor.pos.x + Math.sin(actor.yaw) * 0.55 * scale,
-      1.15 * scale,
-      actor.pos.z + Math.cos(actor.yaw) * 0.55 * scale,
-    );
   }
 
   /** 一簇火星：Points + 逐粒子速度/重力 */
@@ -735,46 +695,6 @@ export class MeleeVFX {
         return true;
       },
       dispose: () => { this._drop(sp); mat.dispose(); },
-    };
-    this.effects.push(effect);
-  }
-
-  /** 冲击环：贴着法线朝外的圆环，向外扩 + 淡出 */
-  _ring(point, opts = {}) {
-    const scale = opts.scale ?? 1;
-    const life = opts.life ?? 0.2;
-    const normal = (opts.normal ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
-
-    const geo = new THREE.RingGeometry(0.42, 0.52, 48);
-    const mat = new THREE.MeshBasicMaterial({
-      color: opts.color ?? 0xffffff,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-    });
-    const mesh = guardFromAO(new THREE.Mesh(geo, mat), mat);
-    mesh.position.copy(point);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-    mesh.frustumCulled = false;
-    mesh.renderOrder = 4;
-    this.scene.add(mesh);
-
-    const from = (opts.from ?? 0.2) * scale;
-    const to = (opts.to ?? 1.2) * scale;
-    let age = 0;
-
-    const effect = {
-      update: (dt) => {
-        age += dt;
-        const t = clamp(age / life, 0, 1);
-        const s = from + (to - from) * (1 - Math.pow(1 - t, 2.0));
-        mesh.scale.set(s, s, s);
-        mat.opacity = Math.pow(1 - t, 1.6) * clamp(VFX_CFG.intensity, 0, 2);
-        if (t >= 1) { this._drop(mesh); geo.dispose(); mat.dispose(); return false; }
-        return true;
-      },
-      dispose: () => { this._drop(mesh); geo.dispose(); mat.dispose(); },
     };
     this.effects.push(effect);
   }

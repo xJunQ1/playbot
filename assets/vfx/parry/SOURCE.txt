@@ -1,0 +1,2 @@
+XsxB-Slash / examples/parry_fable
+https://github.com/sparklecatta-lang/XsxB-Slash/tree/40c07682eb598d2f2411c3a5008fa2e29b7acb09/examples/parry_fable
