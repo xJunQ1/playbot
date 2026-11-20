@@ -39,6 +39,21 @@ export const CFG = {
   paused: false,
 };
 
+const LIFT_END = 43;
+const TOSS_START = LIFT_END + 90;
+
+export const GRAB_TIMING = {
+  pull: 7,
+  lift: LIFT_END,
+  toss: TOSS_START,
+  kickStart: TOSS_START + 3,
+  kick: TOSS_START + 19,
+  followThrough: TOSS_START + 48,
+  recover: TOSS_START + 55,
+  missRecovery: 27,
+  wallStun: 34,
+};
+
 /**
  * 招式定义
  * startup  起手帧
@@ -135,6 +150,30 @@ export const MOVES = {
     minRange: 0, maxRange: 4.5, weight: 0.85, cooldown: 2.0,
   },
 
+  b_heavy_combo: {
+    label: '重剑四连斩', swing: 'horizontal',
+    startup: 24, active: 8, recovery: 204, cancelFrom: 0,
+    damage: 165, poise: 0, hitstun: 16, stamina: 0,
+    // 挥砍窗口按实际剑尖轨迹校准。最后一段是纵向下砸。
+    followUps: [
+      { delay: 36, active: 7 },
+      { delay: 72, active: 8 },
+      { delay: 117, active: 8, swing: 'vertical' },
+    ],
+    motion: [[0, 0], [14, 0.12], [30, 0.75], [48, 0.83], [72, 1.68],
+      [106, 2.32], [129, 2.39], [146, 2.92], [178, 2.92], [220, 3.15]],
+    hitbox: { offset: 0.76, radius: 0.58, yMin: 0.0, yMax: 0.75 },
+    minRange: 2.7, maxRange: 4.5, weight: 0.48, cooldown: 8,
+    requiresClip: true,
+  },
+  b_grab: {
+    label: '破防擒拿', swing: 'none', grab: true,
+    startup: 32, active: 12, recovery: GRAB_TIMING.recover, cancelFrom: 0,
+    damage: 280, poise: 0, hitstun: 0, stamina: 0,
+    dashDistance: 5.25, aimLockFrames: 6,
+    hitbox: { offset: 0.24, radius: 0.42, yMin: 0.10, yMax: 0.64 },
+    minRange: 4.1, maxRange: 6.9, weight: 0.42, cooldown: 13,
+  },
 };
 
 /** 派生：总帧数 */

@@ -11,6 +11,7 @@ const http = require('node:http');
 const ROOT = path.join(__dirname, '..');
 const CONFIG_PATH = path.join(process.env.APPDATA || ROOT, 'souls-demo', 'gpu-config.json');
 const SMOKE = process.argv.includes('--smoke');
+const GRAB_TEST = process.argv.includes('--grab-test');
 
 const DEFAULTS = { angle: 'vulkan', vsync: true, dpr: 1 };
 function readConfig() {
@@ -76,7 +77,8 @@ async function createWindow() {
   win.setMenuBarVisibility(false);
   win.webContents.on('console-message', (_e, level, msg) => { const s = String(msg); if (level >= 1 || /error|fail|undefined|not a/i.test(s)) console.log('[page' + level + '] ' + s.slice(0, 400)); });
   win.webContents.on('render-process-gone', (_e, d) => console.log('[gone] ' + JSON.stringify(d)));
-  await win.loadURL(`http://127.0.0.1:${port}/`);
+  const query = GRAB_TEST ? '?grabTest=1' : '';
+  await win.loadURL(`http://127.0.0.1:${port}/${query}`);
   return port;
 }
 

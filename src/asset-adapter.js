@@ -245,12 +245,39 @@ export class ModelBinder {
     return action;
   }
 
-  /**
-   * 每渲染帧调用。
-   * 关键逻辑：把剪辑时长拉伸到帧表总时长，逻辑帧决定「播到哪」。
-   */
-  update(actor, dt) {
-    const key = this._clipKey(actor);
+  // 从分支时的姿势过渡到原连招的收剑姿势。
+  prepareRecovery(moveId, progress) {
+    const clip = this.clips.get(this.clipMap[moveId]);
+    if (this.recoverySource === clip && this.recoveryProgress === progress) return;
+    const name = 'BossComboRecovery';
+    const previous = this.clips.get(name);
+    if (previous) {
+      this.mixer.uncacheClip(previous);
+      this.actions.delete(name);
+    }
+
+    const from = new THREE.Quaternion(), to = new THREE.Quaternion();
+    const pose = new THREE.Quaternion();
+    const times = [0, 0.25, 0.5, 0.75, 1];
+    const tracks = clip.tracks.map(track => {
+      const sample = track.createInterpolant();
+      from.fromArray(sample.evaluate(clip.duration * progress));
+      to.fromArray(sample.evaluate(clip.duration));
+      const values = [];
+      for (const time of times) {
+        pose.slerpQuaternions(from, to, THREE.MathUtils.smoothstep(time, 0, 1));
+        pose.toArray(values, values.length);
+      }
+      return new THREE.QuaternionKeyframeTrack(track.name, times, values);
+    });
+    this.clips.set(name, new THREE.AnimationClip(name, 1, tracks));
+    this.clipMap.recover = name;
+    this.recoverySource = clip;
+    this.recoveryProgress = progress;
+  }
+
+  // 每渲染帧更新姿态，Boss 出招时用逻辑帧定位动画。
+  update(actor, dt, { key = this._clipKey(actor), sampleTime, fade } = {}) {
     const targetName = this.clipMap[key];
 
     if (targetName && targetName !== this.currentName) {
@@ -263,7 +290,7 @@ export class ModelBinder {
         // 攻击 / 翻滚：单次播放，不循环
         // 攻击/翻滚：单次播放，不循环（heavy2 / heavy3 / light4 也必须算进来，
         // 否则播到片段末尾会绕回第 0 帧，表现为「结尾重复一帧」）
-        const onceState = actor.state === 'roll' || actor.state === 'attack' || actor.state === 'backstep'
+        const onceState = sampleTime !== undefined || actor.state === 'roll' || (actor.state === 'attack' && !actor.move?.grab) || actor.state === 'backstep' || actor.state === 'recover'
           || /^light\d*$/.test(actor.state) || /^heavy\d*$/.test(actor.state);
         if (onceState) {
           next.setLoop(THREE.LoopOnce, 1);
@@ -273,7 +300,7 @@ export class ModelBinder {
         }
 
         // ★ 核心：把动画时长对准帧表
-        if (actor.move) {
+        if (actor.move && key !== 'idle') {
           const frames = totalFrames(actor.move);
           const ratio = (next.getClip().duration * 60) / Math.max(1, frames);
           next.setEffectiveTimeScale(ratio);
@@ -294,7 +321,7 @@ export class ModelBinder {
         const COMBO_RE = /^(light\d|heavy\d?)$/;
         const isComboSeam = COMBO_RE.test(actor.state) || (this.currentName || '').startsWith('HeavyCombo');
         if (prev && prev !== next) {
-          next.crossFadeFrom(prev, isComboSeam ? 0.16 : 0.08, false);   // 视觉淡入，逻辑早已切换
+          next.crossFadeFrom(prev, fade ?? (isComboSeam ? 0.16 : 0.08), false);
         }
 
         next.play();
@@ -303,10 +330,15 @@ export class ModelBinder {
       }
     }
 
-    if (actor.backstep && this.currentName === targetName) {
-      // The simulation frame drives both the planted step and the retreat.
+    const manualFrames = actor.backstep?.frames
+      ?? (actor.isBoss && actor.move && !actor.move.grab ? totalFrames(actor.move) : actor.recoveryFrames);
+    if (sampleTime !== undefined && this.currentName === targetName) {
       this.current.paused = true;
-      this.current.time = this.current.getClip().duration * actor.frame / actor.backstep.frames;
+      this.current.time = Math.min(this.current.getClip().duration, sampleTime);
+    } else if (manualFrames && this.currentName === targetName) {
+      // 多段判定与后撤动作使用逻辑帧，慢放及命中停顿时不会提前播完。
+      this.current.paused = true;
+      this.current.time = this.current.getClip().duration * actor.frame / manualFrames;
     }
     this.mixer.update(dt);
     if (this.solePatches?.length) this.groundPose(actor, dt);
@@ -314,7 +346,7 @@ export class ModelBinder {
   }
 
   groundPose(actor, dt) {
-    if (actor.state !== 'attack' && actor.state !== 'backstep') {
+    if (actor.state !== 'attack' && actor.state !== 'backstep' && actor.state !== 'recover') {
       // Ease the visual offset out through the blend back into locomotion.
       this.root.position.y = THREE.MathUtils.damp(this.root.position.y, this.restRootY, 24, dt);
       return;
@@ -338,6 +370,8 @@ export class ModelBinder {
     // 否则用状态名（idle / move / roll / block / dead ...）。
     // 不能用 `state === 'light1' || 'light2' || 'heavy'` 那种写法 —— || 链恒为真，
     // 会把 'light1' 当成键去查 p_light1 的动画，永远查不到。
+    if (actor.move?.grab) return 'idle';
+    if (actor.state === 'grabbed' || actor.state === 'launched' || actor.state === 'wallstun') return 'hitstun';
     if (actor.moveId) return actor.moveId;
     // 格挡时走动要播行走动画，否则原地循环 + 代码位移 = 滑行
     if (actor.state === 'block' && actor.moving) return 'blockmove';
@@ -985,7 +1019,12 @@ export async function loadClipJSON(binder, url, opts = {}) {
   const data = await res.json();
 
   const tMap = new Map();
-  binder.root.traverse((o) => { if (o.name) tMap.set(o.name, o); });
+  binder.root.traverse(o => { if (o.name) tMap.set(o.name, o); });
+  const byBone = new Map(tMap);
+  for (const [name, bone] of tMap) {
+    const base = stripRigName(name);
+    if (!byBone.has(base)) byBone.set(base, bone);
+  }
   const rest = getTargetRest(binder.root);
 
   // raw：目标骨架和动作文件是同一套命名（都是 Mixamo），直接按名字放行，不做重定向
@@ -1001,7 +1040,7 @@ export async function loadClipJSON(binder, url, opts = {}) {
     const bone = tr.n.slice(0, dot);
     const prop = tr.n.slice(dot + 1);
 
-    const t = rawMap ? rawMap.get(bone) : resolveTargetBone(tMap, bone);
+    const t = rawMap ? rawMap.get(bone) : resolveTargetBone(byBone, bone);
     if (!t) continue;
 
     if (prop === 'quaternion' && rawMap) {
@@ -1021,6 +1060,20 @@ export async function loadClipJSON(binder, url, opts = {}) {
       }
       tracks.push(new THREE.QuaternionKeyframeTrack(t.name + '.quaternion', tr.t, vals));
     }
+  }
+
+  const height = data.hipHeight;
+  const pelvis = height && resolveTargetBone(byBone, height.bone);
+  if (pelvis?.parent) {
+    // 高度以模型空间为单位。Boss 的骨盆父骨骼有缩放和轴向转换，玩家的没有。
+    const up = pelvis.parent.worldToLocal(binder.root.localToWorld(new THREE.Vector3(0, 1, 0)))
+      .sub(pelvis.parent.worldToLocal(binder.root.getWorldPosition(new THREE.Vector3())));
+    const values = new Float32Array(height.v.length * 3);
+    const position = new THREE.Vector3();
+    for (let i = 0; i < height.v.length; i++) {
+      position.copy(pelvis.position).addScaledVector(up, height.v[i]).toArray(values, i * 3);
+    }
+    tracks.push(new THREE.VectorKeyframeTrack(`${pelvis.name}.position`, height.t, values));
   }
 
   let clip = new THREE.AnimationClip(opts.name ?? data.name ?? 'clip', data.duration ?? 1, tracks);

@@ -433,11 +433,15 @@ export class MeleeVFX {
   telegraph(actor, move) {
     if (!VFX_CFG.telegraph || !actor || !move || !move.hitbox || move.active <= 0) return null;
 
-    const anchor = this._handAnchor(actor);
+    const anchor = move.grab ? this._grabAnchor(actor) : this._handAnchor(actor);
     if (!anchor) return null;
 
     // 注意：fighter 的 group 已经按 actor.scale 缩放过，这里一律用「局部单位」
-    const layerDefs = [
+    const layerDefs = move.grab ? [
+      { size: 0.46, color: 0xff4949, opacity: 0.98 },
+      { size: 1.02, color: 0xff081b, opacity: 0.83 },
+      { size: 1.72, color: 0xdb0018, opacity: 0.42 },
+    ] : [
       { size: 0.30, color: 0xff7a4a, opacity: 0.90 },  // 芯：亮到发白
       { size: 0.66, color: 0xff3a10, opacity: 0.46 },  // 焰
       { size: 1.30, color: 0xc01000, opacity: 0.20 },  // 晕：把空气也染红
@@ -446,6 +450,7 @@ export class MeleeVFX {
     const sprites = [];
     const mats = [];
     const base = anchor.offset;
+    const localSize = anchor.localSize ?? 1;
 
     for (const L of layerDefs) {
       const mat = new THREE.SpriteMaterial({
@@ -457,7 +462,7 @@ export class MeleeVFX {
       });
       const sp = guardFromAO(new THREE.Sprite(mat), mat);
       sp.position.copy(base);
-      sp.scale.setScalar(L.size);
+      sp.scale.setScalar(L.size * localSize);
       sp.renderOrder = 6;
       anchor.obj.add(sp);
       sprites.push(sp);
@@ -469,16 +474,16 @@ export class MeleeVFX {
     for (let i = 0; i < 5; i++) {
       const mat = new THREE.SpriteMaterial({
         map: tex().spark ?? null,
-        color: 0xff9a5a,
+        color: move.grab ? 0xff2638 : 0xff9a5a,
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
       const sp = guardFromAO(new THREE.Sprite(mat), mat);
-      sp.scale.setScalar(rand(0.04, 0.085));
+      sp.scale.setScalar(rand(0.04, 0.085) * localSize);
       sp.position.copy(base).add(new THREE.Vector3(
         rand(-0.08, 0.08), rand(-0.06, 0.05), rand(-0.08, 0.08),
-      ));
+      ).multiplyScalar(localSize));
       sp.renderOrder = 6;
       anchor.obj.add(sp);
       sprites.push(sp);
@@ -520,7 +525,7 @@ export class MeleeVFX {
 
         for (let i = 0; i < layerDefs.length; i++) {
           mats[i].opacity = layerDefs[i].opacity * out * flick * k;
-          sprites[i].scale.setScalar(layerDefs[i].size * (0.7 + 0.6 * out));
+          sprites[i].scale.setScalar(layerDefs[i].size * localSize * (0.7 + 0.6 * out));
         }
 
         for (const e of embers) {
@@ -529,9 +534,9 @@ export class MeleeVFX {
             e.t = 0;
             e.sp.position.copy(base).add(new THREE.Vector3(
               rand(-0.08, 0.08), rand(-0.06, 0.04), rand(-0.08, 0.08),
-            ));
+            ).multiplyScalar(localSize));
           }
-          e.sp.position.y += dt * e.speed * 0.45;
+          e.sp.position.y += dt * e.speed * 0.45 * localSize;
           e.mat.opacity = Math.sin(e.t * Math.PI) * 0.85 * out * k;
         }
 
@@ -543,6 +548,21 @@ export class MeleeVFX {
     actor.__vfxTele = token;
     this.effects.push(effect);
     return effect;
+  }
+
+  // Follow the torso even when the model's mesh is offset from its actor origin.
+  _grabAnchor(actor) {
+    const root = actor.binder?.root;
+    const chest = root
+      ? this._findBone(root, /(?:spine2|spine_03|upperchest)$/i)
+      : actor.mesh.chest;
+    if (!chest) return { obj: actor.mesh.group, offset: new THREE.Vector3(0, 1.32, 0.38) };
+    const world = chest.getWorldPosition(new THREE.Vector3());
+    const camera = this.getCamera();
+    const front = camera ? camera.position.clone().sub(world).normalize() : actor.forward;
+    const offset = chest.worldToLocal(world.addScaledVector(front, 0.18));
+    const scale = chest.getWorldScale(new THREE.Vector3());
+    return { obj: chest, offset, localSize: 1 / Math.max(0.001, scale.x) };
   }
 
   /** 找右手：灰盒用武器（把光放在握把上），真模型找 hand 骨骼 */

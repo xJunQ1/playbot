@@ -224,7 +224,7 @@ export function makeFighter(isBoss, scale = 1) {
     foot.position.set(0, -0.46, 0.06);
     shin.add(foot);
 
-    return { leg, shin };
+    return { leg, shin, foot };
   };
   const RL = makeLeg(1);
   const LL = makeLeg(-1);
@@ -269,8 +269,8 @@ export function makeFighter(isBoss, scale = 1) {
 
   return {
     group, body, hips, spine, chest, head,
-    armL: L.arm, foreL: L.fore, armR: R.arm, foreR: R.fore,
-    legL: LL.leg, shinL: LL.shin, legR: RL.leg, shinR: RL.shin,
+    armL: L.arm, foreL: L.fore, handL: L.fist, armR: R.arm, foreR: R.fore,
+    legL: LL.leg, shinL: LL.shin, footL: LL.foot, legR: RL.leg, shinR: RL.shin, footR: RL.foot,
     lowerTorso, upperTorso, weapon, ring, guard, guardEdge, matBody, matAccent,
   };
 }
