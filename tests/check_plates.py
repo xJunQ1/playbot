@@ -3,7 +3,7 @@
 import math
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://localhost:5173/?autostart=1"
 
 PLATE = """() => {
   const { player: p, boss: b } = window.__dbg;

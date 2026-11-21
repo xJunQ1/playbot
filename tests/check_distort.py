@@ -17,7 +17,7 @@ with sync_playwright() as pw:
         errs = []
         pg.on("pageerror", lambda e: errs.append(str(e)))
         pg.on("console", lambda m: errs.append(f"[{m.type}] {m.text}") if m.type == "error" else None)
-        pg.goto("http://localhost:5173/" + q, wait_until="load")
+        pg.goto("http://localhost:5173/" + q + "&autostart=1", wait_until="load")
         pg.wait_for_timeout(9000 if tag == "pack" else 5000)
 
         # 冻结 + 正面特写

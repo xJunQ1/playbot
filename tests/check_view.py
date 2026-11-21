@@ -2,7 +2,7 @@
 """Front/back view: prove which way the actor is actually facing."""
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://localhost:5173/?autostart=1"
 
 ORBIT = """(angleDeg) => {
   const { camera, player } = window.__dbg;

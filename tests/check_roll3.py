@@ -2,7 +2,7 @@
 """Fine-grained state sampling to find what resets the roll."""
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/Y_Bot.glb&anim=1"
+Q = "?autostart=1&p=assets/Y_Bot.glb&anim=1"
 
 with sync_playwright() as pw:
     b = pw.chromium.launch(args=[

@@ -6,7 +6,21 @@
 <title>浮空要塞 · 猩红竞技场</title>
 <link rel="stylesheet" href="./src/game-ui.css">
 </head>
-<body class="booting">
+<body class="booting on-title">
+<section id="titleScreen" aria-labelledby="gameTitle">
+  <div class="title-border" aria-hidden="true"></div>
+  <div class="title-content">
+    <div class="title-crest" aria-hidden="true"><span></span></div>
+    <p class="title-location">浮 空 要 塞</p>
+    <h1 id="gameTitle">猩红<br>竞技场</h1>
+    <div class="title-rule" aria-hidden="true"></div>
+    <div class="title-actions">
+      <button id="startGame" type="button" disabled><span aria-hidden="true">◆</span>开始游戏</button>
+      <button id="titleSettings" type="button" aria-haspopup="dialog">设置</button>
+    </div>
+    <p id="titleLoading" role="status">正在加载战场</p>
+  </div>
+</section>
 <main id="hud" aria-label="战斗状态">
   <section class="player-hud" aria-label="玩家">
     <div class="portrait" aria-hidden="true"><span></span></div>
@@ -155,7 +169,11 @@
     </div>
     <footer class="settings-foot">
       <p>设置会即时保存</p>
-      <div><button id="setReset" type="button">恢复默认</button><button id="setClose" class="primary" type="button">返回战斗</button></div>
+      <div>
+        <button id="setReset" type="button">恢复默认</button>
+        <button id="exitToTitle" type="button" hidden>返回开始页</button>
+        <button id="setClose" class="primary" type="button"><span class="settings-from-game">返回战斗</span><span class="settings-from-title">返回开始页</span></button>
+      </div>
     </footer>
   </section>
 </div>

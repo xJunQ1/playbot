@@ -4,7 +4,7 @@ import json
 from playwright.sync_api import sync_playwright
 
 BASE = "http://localhost:5173/"
-Q = "?p=assets/hero.glb&ps=1.0&py=3.1416&b=assets/xbot.glb&bs=2.6&by=3.1416"
+Q = "?autostart=1&p=assets/hero.glb&ps=1.0&py=3.1416&b=assets/xbot.glb&bs=2.6&by=3.1416"
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(args=[

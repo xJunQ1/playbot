@@ -1,4 +1,4 @@
-﻿import * as THREE from 'three';
+import * as THREE from 'three';
 
 // ─────────────────────────────────────────────────────────────
 //  程序化贴图：全部用 canvas 画，不依赖任何外部图片
@@ -130,7 +130,7 @@ export function paintFloorContact(map, meters, x, z, width, depth, yaw = 0, opac
   map.needsUpdate = true;
 }
 
-export function makeMasonryTextures(low) {
+export function makeMasonryTextures(low, columns = 95, rows = 36) {
   const width = low ? 1024 : 2048, height = low ? 256 : 512;
   const albedo = canvas(width, height), depth = canvas(width, height);
   const color = albedo.getContext('2d'), relief = depth.getContext('2d');
@@ -139,12 +139,12 @@ export function makeMasonryTextures(low) {
   relief.fillStyle = '#444';
   relief.fillRect(0, 0, width, height);
 
-  for (let row = 0; row < 36; row++) {
-    const y = row * height / 36;
-    const h = height / 36;
-    for (let x = (row % 2 ? -.59 : -.03) * width / 95; x < width;) {
-      const w = width / 95 * (.68 + rnd() * .69);
-      const gapX = width * .00044, gapY = Math.max(.56, h * .048);
+  for (let row = 0; row < rows; row++) {
+    const y = row * height / rows;
+    const h = height / rows;
+    for (let x = (row % 2 ? -.59 : -.03) * width / columns; x < width;) {
+      const w = width / columns * (.68 + rnd() * .69);
+      const gapX = Math.max(width * .00044, w * (columns < 16 ? .027 : .001)), gapY = Math.max(.56, h * .048);
       const lum = 62 + Math.floor(rnd() * 27);
       color.fillStyle = `rgb(${lum},${lum - 3},${lum + 7})`;
       color.fillRect(x + gapX, y + gapY, w - gapX * 2, h - gapY * 2);
@@ -164,6 +164,27 @@ export function makeMasonryTextures(low) {
     color.fillRect(x, y, w, height * .28);
   }
   return { map: tex(albedo), normalMap: makeNormalMap(depth, 2.15) };
+}
+
+export function makeRoofTileTexture() {
+  const sheet = canvas(256);
+  const ctx = sheet.getContext('2d');
+  ctx.fillStyle = '#292631';
+  ctx.fillRect(0, 0, 256, 256);
+  for (let row = 0; row < 12; row++) {
+    const y = row * 256 / 12;
+    for (let col = -1; col < 8; col++) {
+      const x = col * 32 + (row % 2) * 16;
+      const light = 56 + Math.floor(rnd() * 33);
+      ctx.fillStyle = `rgb(${light}, ${light - 2}, ${light + 7})`;
+      ctx.fillRect(x + 1, y, 30, 20);
+      ctx.fillStyle = '#c4b9c344';
+      ctx.fillRect(x + 1, y, 30, 1.5);
+      ctx.fillStyle = '#1c182849';
+      ctx.fillRect(x + 1, y + 17, 30, 3.1);
+    }
+  }
+  return tex(sheet);
 }
 
 export function makeRadialGlow() {

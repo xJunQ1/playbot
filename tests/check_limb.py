@@ -2,7 +2,7 @@
 """Limb-direction check: from the side, is the knee / elbow bending forward?"""
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/?graybox=1"
+URL = "http://localhost:5173/?graybox=1&autostart=1"
 
 SIDE_CAM = """(which) => {
   const { camera, player, boss } = window.__dbg;

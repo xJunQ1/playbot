@@ -42,7 +42,7 @@ export function tintBossFace(root) {
     mesh.material = material;
   });
 }
-export function createBossIntro(scene, boss, camera) {
+export function createBossIntro(scene, boss, camera, impactSurface) {
   const { binder, weapon } = boss;
   if (!binder || !weapon?.parent) return null;
   const bones = new Map();
@@ -87,7 +87,7 @@ export function createBossIntro(scene, boss, camera) {
   const worldRotation = new THREE.Quaternion(), rotation = new THREE.Quaternion();
   const gamePosition = camera.position.clone(), gameRotation = camera.quaternion.clone();
   const cameraTarget = new THREE.Vector3();
-  const landing = createMeteorLanding(scene, boss.pos);
+  const landing = createMeteorLanding(scene, boss.pos, impactSurface);
   const modelVisible = binder.root.visible;
   binder.root.visible = false;
   let age = 0;

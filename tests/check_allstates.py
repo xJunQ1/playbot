@@ -2,7 +2,7 @@
 """Capture every state close-up so distortion is visible per action."""
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/Y_Bot.glb&anim=1"
+Q = "?autostart=1&p=assets/Y_Bot.glb&anim=1"
 
 # 相机放在 forward 方向 = 角色正前方，能直接看出朝向对不对
 CAM_FRONT = """() => {

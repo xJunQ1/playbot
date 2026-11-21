@@ -3,7 +3,7 @@
 from playwright.sync_api import sync_playwright
 
 BASE = "http://localhost:5173/"
-Q = "?p=assets/hero.glb&py=3.1416"
+Q = "?autostart=1&p=assets/hero.glb&py=3.1416"
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(args=[

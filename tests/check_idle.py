@@ -2,7 +2,7 @@
 """Idle / slash / run close-ups with retargeted Mixamo clips."""
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/xbot.glb&py=3.1416&anim=1"
+Q = "?autostart=1&p=assets/xbot.glb&py=3.1416&anim=1"
 
 CAM = """() => {
   const { camera, player } = window.__dbg;

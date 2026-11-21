@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { buildBasinGeometry, rimScale } from '../arena/impact-surface.js';
+import { fracturedRock } from '../arena/weathered.js';
 import { guardFromAO } from './ao-guard.js';
 
 const { smoothstep, lerp } = THREE.MathUtils;
@@ -22,9 +24,10 @@ function sheet(width, height, fragmentShader, additive = false) {
   return mesh;
 }
 
-export function createMeteorLanding(scene, position) {
+export function createMeteorLanding(scene, position, surface) {
   const root = new THREE.Group();
   root.name = 'boss-meteor-landing';
+  position = position.clone();
   root.position.copy(position);
   scene.add(root);
 
@@ -63,28 +66,9 @@ export function createMeteorLanding(scene, position) {
   flare.position.y = 0.25;
   root.add(flare);
 
-  const crater = sheet(5.3, 5.3, `
-    varying vec2 vUv;
-    uniform float time, strength;
-    void main() {
-      vec2 p = vUv*2.0 - 1.0;
-      float a = atan(p.y,p.x), r = length(p);
-      float rim = 0.70 + 0.045*sin(7.0*a) + 0.034*sin(13.0*a+0.6) + 0.025*sin(23.0*a);
-      float grain = fract(sin(dot(floor(p*130.0),vec2(17.1,31.7)))*437.13);
-      float basin = 1.0 - smoothstep(rim-0.15,rim,r);
-      float lip = 1.0-smoothstep(0.01,0.085,abs(r-rim+0.035));
-      float seam = abs(sin(a*8.0 + 1.3*sin(a*3.0) + 0.75*sin(r*17.0+a)));
-      float cracks = (1.0-smoothstep(0.014,0.09,seam))*smoothstep(0.12,0.46,r)*(1.0-smoothstep(rim,rim+0.23,r));
-      float heat = exp(-1.7*time);
-      vec3 color = mix(vec3(0.045,0.027,0.045), vec3(0.17,0.11,0.14),r) * (0.7 + grain*0.42);
-      color += lip * (0.25 + 0.15*sin(a-1.0))*vec3(0.66,0.46,0.45);
-      color = mix(color,vec3(0.016,0.004,0.008) + heat*vec3(1.0,0.048,0.007),cracks);
-      float alpha = max(max(basin*0.94,lip),cracks);
-      gl_FragColor = vec4(color, alpha*strength);
-    }`);
+  const crater = new THREE.Mesh(buildBasinGeometry(), surface.basin);
   crater.name = 'boss-impact-crater';
-  crater.rotation.x = -Math.PI/2;
-  crater.position.y = 0.052;
+  crater.receiveShadow = true;
   root.add(crater);
 
   const shock = sheet(2, 2, `
@@ -102,31 +86,29 @@ export function createMeteorLanding(scene, position) {
   shock.position.y = 0.086;
   root.add(shock);
 
-  const rockGeometry = new THREE.IcosahedronGeometry(1,0);
-  // Baked facet colors keep the broken stone readable against the arena's dark floor.
-  const normals = rockGeometry.getAttribute('normal');
-  const colors = [], color = new THREE.Color();
+  const rockGeometry = fracturedRock();
+  const normals = rockGeometry.attributes.normal, positions = rockGeometry.attributes.position;
+  const colors = [];
   for (let i = 0; i < normals.count; i++) {
-    const light = 0.71+0.29*normals.getY(i)+0.13*normals.getX(i);
-    color.setHex(0x67536c).multiplyScalar(light);
-    colors.push(color.r,color.g,color.b);
+    const shade = .81 + .16 * normals.getY(i) + .08 * Math.sin(positions.getX(i) * 19 + positions.getZ(i) * 11);
+    colors.push(shade, shade * .95, shade * .91);
   }
-  rockGeometry.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
-  const rockMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, precision: 'highp' });
-  const count = 62;
-  const rocks = new THREE.InstancedMesh(rockGeometry, rockMaterial, count);
+  rockGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const count = 54;
+  const rocks = new THREE.InstancedMesh(rockGeometry, surface.rock, count);
   rocks.name = 'boss-impact-rubble';
   rocks.frustumCulled = false;
+  rocks.receiveShadow = true;
   rocks.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   root.add(rocks);
   const dummy = new THREE.Object3D();
-  const fragments = Array.from({length:count}, (_,i) => {
-    const angle = i*2.39996, chip = i >= 32;
-    const noise = (i*37 % 59)/59;
-    return { x: Math.cos(angle), z: Math.sin(angle), angle, chip,
-      radius: (chip ? 0.75 : 1.75) + noise*(chip ? 1.65 : 0.49),
-      size: chip ? 0.055 + noise*0.13 : 0.12 + noise*0.20,
-      flight: 0.45 + noise*0.48, height: 0.42 + noise*1.1 };
+  const fragments = Array.from({ length: count }, (_, i) => {
+    const noise = (i * 37 % 59) / 59;
+    const angle = i * 2.39996 + noise * .35, flying = i >= 20;
+    return { x: Math.cos(angle), z: Math.sin(angle), angle, flying,
+      radius: flying ? 1.37 + noise * 1.65 : rimScale(angle) * (1.75 + noise * .62),
+      size: flying ? .03 + noise * .13 : .08 + noise * .18,
+      flight: .28 + noise * .63, height: .28 + noise * 1.50 };
   });
 
   return {
@@ -148,32 +130,36 @@ export function createMeteorLanding(scene, position) {
       }
       shock.visible = !airborne && sinceImpact < 0.68;
       if (airborne) return;
-      crater.scale.setScalar(lerp(0.43,1,smoothstep(sinceImpact,0,0.15)));
-      crater.material.uniforms.strength.value = opacity;
-      crater.material.uniforms.time.value = sinceImpact;
+      const footprint = opacity > 0 ? lerp(.72, 2.10, smoothstep(sinceImpact, 0, .19)) * Math.sqrt(opacity) : 0;
+      surface.set(position, footprint);
+      crater.visible = footprint > .001;
+      crater.scale.set(footprint, Math.min(1, footprint), footprint);
+      surface.heat.value = Math.exp(-1.8 * sinceImpact);
       if (shock.visible) {
         shock.scale.setScalar(0.45 + 4.2*(1-(1-sinceImpact/0.68)**2));
         shock.material.uniforms.time.value = sinceImpact;
         shock.material.uniforms.strength.value = 1.7*(1-smoothstep(sinceImpact,0,0.68));
       }
-      fragments.forEach(({x,z,angle,chip,radius,size,flight,height},i) => {
-        const t = Math.min(1,sinceImpact/flight);
-        const spread = chip ? lerp(0.38,radius+0.9,t) : radius*lerp(0.80,1,smoothstep(t,0,0.42));
-        const lift = chip ? height*4*t*(1-t) : 0.11*Math.sin(Math.PI*t);
-        dummy.position.set(x*spread,0.04+lift+size*0.17-(1-opacity)*size*1.8,z*spread);
-        dummy.rotation.set(0.27+0.63*t,angle+0.82*t,(chip ? 2.6*t : 0.32)*x);
-        dummy.scale.set(size*1.30,size*0.52,size*0.93);
+      fragments.forEach(({ x, z, angle, flying, radius, size, flight, height }, i) => {
+        const t = Math.min(1, sinceImpact / flight);
+        const spread = flying ? lerp(.22, radius, t) : radius * lerp(.74, 1, smoothstep(t, 0, .43));
+        const lift = flying ? height * 4 * t * (1 - t) : .14 * Math.sin(Math.PI * t);
+        const scale = size * Math.min(1, opacity * 3);
+        dummy.position.set(x * spread, lift + scale * .30 - .02 - (1 - opacity) * .28, z * spread);
+        dummy.rotation.set(.21 + .33 * t, angle + .62 * t, (flying ? 2.3 * t : .68) * x);
+        dummy.scale.set(scale * 1.25, scale * (flying ? .73 : .46), scale * .86);
         dummy.updateMatrix();
-        rocks.setMatrixAt(i,dummy.matrix);
+        rocks.setMatrixAt(i, dummy.matrix);
       });
       rocks.instanceMatrix.needsUpdate = true;
     },
     dispose() {
+      surface.set(position, 0);
       root.removeFromParent();
       rocks.dispose();
       for (const mesh of root.children) {
         mesh.geometry.dispose();
-        mesh.material.dispose();
+        if (mesh !== crater && mesh !== rocks) mesh.material.dispose();
       }
     },
   };

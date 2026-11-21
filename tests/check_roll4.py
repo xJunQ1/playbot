@@ -2,7 +2,7 @@
 """Freeze the roll at specific clip times and capture."""
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/Y_Bot.glb&anim=1"
+Q = "?autostart=1&p=assets/Y_Bot.glb&anim=1"
 CAM = """() => {
   const { camera, player } = window.__dbg;
   const p = player.pos, s = player.yaw + Math.PI / 2;

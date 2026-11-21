@@ -3,7 +3,7 @@
 import json
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/Y_Bot.glb&b=assets/Y_Bot.glb&anim=1&bh=4.0"
+Q = "?autostart=1&p=assets/Y_Bot.glb&b=assets/Y_Bot.glb&anim=1&bh=4.0"
 
 with sync_playwright() as pw:
     b = pw.chromium.launch(args=[

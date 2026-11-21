@@ -2,7 +2,7 @@
 """Check clip duration vs frame-table length, and confirm timeScale is sane."""
 from playwright.sync_api import sync_playwright
 
-Q = "?p=assets/xbot.glb&b=assets/xbot.glb&anim=1"
+Q = "?autostart=1&p=assets/xbot.glb&b=assets/xbot.glb&anim=1"
 
 with sync_playwright() as pw:
     b = pw.chromium.launch(args=[

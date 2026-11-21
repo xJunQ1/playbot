@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import * as T from './tex.js';
 import { buildArenaProps } from './props.js';
+import { buildNorthGate, buildOuterFortress } from './fortress.js';
+import { createImpactSurface } from './impact-surface.js';
 import { arenaRailings, ruinedColumns, towerStonework, wallCrownColumns } from './stonework.js';
 import { brazierFlame, carvedRobe, chippedStone, cloudLayer, fracturedRock, wovenCloth } from './weathered.js';
 import { guardFromAO } from '../vfx/ao-guard.js';
@@ -44,6 +46,8 @@ export function buildStage(scene, opts = {}) {
 const TEXLOW = new URLSearchParams(location.search).get('tex') === 'low';
 const floorTextures = T.makeFloorTextures(TEXLOW ? 1024 : 2048, R * 2);
 const masonry = T.makeMasonryTextures(TEXLOW);
+const fortressStone = T.makeMasonryTextures(true, 5, 6);
+const roofTiles = T.makeRoofTileTexture();
 const texMagic = T.makeMagicTexture(TEXLOW ? 2048 : 4096, R * 2, R / 22);
 // 金线非常细：各向异性过滤开到最大，否则贴着看/斜着看时细线会在 mip 里被抹掉，
 // 表现为「金色花纹时而出现时而消失」
@@ -143,6 +147,7 @@ const grainUrl = new URL('../../assets/arena/basalt-grain.webp', import.meta.url
 new THREE.ImageLoader().load(grainUrl.href, image => {
   T.layerStoneGrain(floorTextures.map, image, TEXLOW ? 16 : 24, 0.78);
   T.layerStoneGrain(masonry.map, image, 26, 0.70);
+  T.layerStoneGrain(fortressStone.map, image, 2, .67);
   T.layerStoneGrain(texStone, image, 1, 0.72);
   T.layerStoneGrain(texStoneDark, image, 1, 0.56);
   T.layerStoneGrain(albedoRelief, image, 2, 0.58);
@@ -169,8 +174,10 @@ const columnMaterials = {
     roughness: .94, vertexColors: true,
   }),
   fracture: new THREE.MeshStandardMaterial({
-    map: brokenTile, bumpMap: brokenTile, bumpScale: .112, color: 0xd1bab0,
-    roughness: 1, vertexColors: true, flatShading: true,
+    // The crater and fracture meshes already have normals from their geometry.
+    // Avoid stacking screen-space bump and flat normals on the same rough surface.
+    map: brokenTile, color: 0xd1bab0, roughness: 1, vertexColors: true,
+    precision: 'highp',
   }),
   seams: new THREE.MeshStandardMaterial({
     map: dressedTile, bumpMap: dressedTile, bumpScale: .065, color: 0x948385,
@@ -186,6 +193,37 @@ matStoneDark.name = 'stoneDark';
 matGoldLine.name = 'goldLine';
 matIron.name = 'iron';
 matCrimson.name = 'crimson';
+
+const architecture = {
+  stone: new THREE.MeshStandardMaterial({
+    ...fortressStone, color: 0xc7b7b5, emissive: 0x2d212d, vertexColors: true, roughness: .96,
+  }),
+  trim: columnMaterials.dressed.clone(),
+  slate: columnMaterials.seams.clone(),
+  roof: new THREE.MeshStandardMaterial({
+    map: roofTiles, bumpMap: roofTiles, bumpScale: .16, color: 0x918596,
+    emissive: 0x15121b, vertexColors: true, roughness: .97,
+  }),
+  iron: matIron.clone(),
+  doorway: new THREE.MeshStandardMaterial({
+    color: 0x29232a, emissive: 0x2a151c, vertexColors: true, roughness: 1,
+  }),
+  lamp: new THREE.MeshStandardMaterial({
+    color: 0xab6433, emissive: 0xfb752d, emissiveIntensity: .47, vertexColors: true, roughness: .69,
+  }),
+};
+architecture.slate.color.set(0x726983);
+architecture.iron.vertexColors = true;
+const impactSurface = createImpactSurface(columnMaterials.fracture);
+const floorInlay = matGoldLine.clone();
+for (const material of [matFloor, floorInlay]) impactSurface.clip(material);
+
+// Ring and cylinder geometries use different zero angles. The north gap
+// must be centered on -Z for every wall course and coping.
+function northOpenRing(major, tube, gap) {
+  return new THREE.TorusGeometry(major, tube, 7, 148, Math.PI * 2 - gap)
+    .rotateZ(Math.PI / 2 + gap / 2).rotateX(-Math.PI / 2);
+}
 
 const root = new THREE.Group();
   const obstacles = [];   // 战斗平面的立柱圆形和倒柱旋转矩形
@@ -271,8 +309,7 @@ function buildPlatform() {
 
   // 外沿压边（三层线脚）
   for (const [r, y, t] of [[R + 0.05, 0.12, 0.34], [R + 0.1, -0.1, 0.2], [R - 0.05, -0.42, 0.22]]) {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(r, t, 10, 180), matStone);
-    ring.rotation.x = -Math.PI / 2;
+    const ring = new THREE.Mesh(northOpenRing(r, t, .34), matStone);
     ring.position.y = y;
     root.add(ring);
   }
@@ -367,7 +404,7 @@ buildPlatform();
 
   // 顶部环面：墙从此有了厚度
   const cap = new THREE.Mesh(
-    new THREE.RingGeometry(rTop - 1.7, rTop + 0.4, 96, 1, Math.PI + gap / 2, Math.PI * 2 - gap),
+    new THREE.RingGeometry(rTop - 1.7, rTop + 0.4, 96, 1, Math.PI / 2 + gap / 2, Math.PI * 2 - gap),
     matTrim
   );
   cap.rotation.x = -Math.PI / 2;
@@ -376,8 +413,7 @@ buildPlatform();
 
   // 压顶圆线（内外两道）
   for (const [rr, tube] of [[rTop - 0.1, 0.3], [rTop - 1.75, 0.22]]) {
-    const t = new THREE.Mesh(new THREE.TorusGeometry(rr, tube, 6, 160), matTrim);
-    t.rotation.x = -Math.PI / 2;
+    const t = new THREE.Mesh(northOpenRing(rr, tube, gap), matTrim);
     t.position.y = topY + 0.3;
     scene.add(t);
   }
@@ -386,7 +422,7 @@ buildPlatform();
   const winW = 1.05, winH = 3.2, archK = 1.35;
   for (let i = 0; i < 12; i++) {
     const a = ((i + 0.5) / 12) * Math.PI * 2 + Math.PI / 12;
-    const d = Math.abs(((a - Math.PI + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+    const d = Math.abs(THREE.MathUtils.euclideanModulo(a + Math.PI * 1.5, Math.PI * 2) - Math.PI);
     if (d < 0.2) continue;
 
     const g = new THREE.Group();
@@ -461,6 +497,7 @@ buildPlatform();
   const stems = [];
   for (let i = 0; i < (TEXLOW ? 35 : 64); i++) {
     const a0 = Math.random() * Math.PI * 2;
+    if (Math.sin(a0) < -.936) continue;
     let a = a0, y = -5 + Math.random() * 3;
     const pts = [];
     for (let k = 0; k < 7; k++) {
@@ -581,6 +618,7 @@ buildPlatform();
     map: crackTex, transparent: true, opacity: 0.56, depthWrite: false,
     toneMapped: false, polygonOffset: true, polygonOffsetFactor: -2,
   });
+  impactSurface.clip(crackMat);
   const NO_CRACK = new URLSearchParams(location.search).get('cracks') === '0';
   for (let i = 0; i < (NO_CRACK ? 0 : 9); i++) {
     const a = Math.random() * Math.PI * 2;
@@ -642,7 +680,7 @@ buildPlatform();
     [R + 0.54, -0.60], [R + 0.50, -0.42], [R + 0.66, -0.30], [R + 0.72, -0.14],
     [R + 0.56, 0.00], [R + 0.30, 0.06], [R + 0.24, 0.16], [R - 0.02, 0.18],
   ].map(([x, y]) => new THREE.Vector2(x, y));
-  const cornice = new THREE.Mesh(new THREE.LatheGeometry(prof, 200), matStone);
+  const cornice = new THREE.Mesh(new THREE.LatheGeometry(prof, 200, Math.PI + .17, Math.PI * 2 - .34), matStone);
   cornice.castShadow = true;
   cornice.receiveShadow = true;
   root.add(cornice);
@@ -662,14 +700,14 @@ buildPlatform();
 
   // 地面铜饰：三道嵌铜环 + 12 道细铜条
   for (const rr of [R * 0.44, R * 0.63, R * 0.81]) {
-    const inlay = new THREE.Mesh(new THREE.TorusGeometry(rr, 0.055, 6, 200), matGoldLine);
+    const inlay = new THREE.Mesh(new THREE.TorusGeometry(rr, 0.055, 6, 200), floorInlay);
     inlay.rotation.x = -Math.PI / 2;
     inlay.position.y = 0.035;
     root.add(inlay);
   }
   for (let i = 0; i < 12; i++) {
     const a = (i / 12) * Math.PI * 2 + Math.PI / 24;
-    const strip = new THREE.Mesh(new THREE.BoxGeometry(R * 0.37, 0.02, 0.09), matGoldLine);
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(R * 0.37, 0.02, 0.09), floorInlay);
     strip.position.set(Math.cos(a) * R * 0.62, 0.033, Math.sin(a) * R * 0.62);
     strip.rotation.y = -a;
     root.add(strip);
@@ -679,7 +717,7 @@ buildPlatform();
   const rIn = R + 10.4;
   for (let i = 0; i < 24; i++) {
     const a = (i / 24) * Math.PI * 2 + Math.PI / 24;
-    const d = Math.abs(((a - Math.PI + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+    const d = Math.abs(THREE.MathUtils.euclideanModulo(a + Math.PI * 1.5, Math.PI * 2) - Math.PI);
     if (d < 0.24) continue;
 
     // 带圆拱的洞口：上面是半圆，下面直边
@@ -716,8 +754,7 @@ buildPlatform();
     root.add(corbel);
   }
   for (const yy of [-1.9, 5.9]) {
-    const band = new THREE.Mesh(new THREE.TorusGeometry(rIn - 0.1, 0.2, 6, 180), matStoneDark);
-    band.rotation.x = -Math.PI / 2;
+    const band = new THREE.Mesh(northOpenRing(rIn - 0.1, 0.2, .38), matStoneDark);
     band.position.y = yy;
     root.add(band);
   }
@@ -739,6 +776,7 @@ function buildMagic() {
   plane.rotation.x = -Math.PI / 2;
   plane.position.y = 0.041;   // 抬高一点，彻底离开台面/贴花所在的深度层
   root.add(plane);
+  impactSurface.clip(plane.material);
   REFS.magicMat = plane.material;
   REFS.magicOpacity = MAGIC_OPACITY;
 
@@ -753,6 +791,7 @@ function buildMagic() {
   glow.rotation.x = -Math.PI / 2;
   glow.position.y = 0.02;
   root.add(glow);
+  impactSurface.clip(glow.material);
   REFS.glowMat = glow.material;
 }
 buildMagic();
@@ -812,9 +851,9 @@ function buildStairs() {
 }
 buildStairs();
 
-REFS.decor.push(buildArenaProps(root, R, WALK, {
-  stone: matStone, trim: matStoneDark, iron: matIron,
-}, texFlame));
+REFS.decor.push(buildArenaProps(root, WALK, {
+  trim: matStoneDark, iron: matIron,
+}));
 
 // ═══════════════════════════════════════ 火盆塔（四个对角）
 const braziers = [];
@@ -1024,7 +1063,7 @@ function buildFoliage() {
   const count = TEXLOW ? 24 : 47;
   for (let index = 0; index < count; index++) {
     const a = index / count * Math.PI * 2 + Math.random() * .16;
-    if (Math.sin(a) < -.98) continue;
+    if (Math.sin(a) < -.955) continue;
     const r = R + 2.45 + Math.random() * 5.5;
     const x = Math.cos(a) * r, z = Math.sin(a) * r;
     for (let j = 0; j < 5; j++) {
@@ -1190,11 +1229,6 @@ function buildSurround() {
     color: 0xc4b9c4, emissive: 0x251d2c, emissiveIntensity: 1.0,
     roughness: 0.95, metalness: 0.02, side: THREE.DoubleSide,
   }));
-  const matWallDark = new THREE.MeshStandardMaterial({
-    map: texStoneDark, color: 0x9d92b4, emissive: 0x141022, emissiveIntensity: 1.0,
-    roughness: 0.97, metalness: 0.02,
-  });
-
   // 一圈圆形城墙（不是方墙）：北面留 34° 的缺口给门桥
   const rTop = R + 11, rBot = R + 13, H = 24, baseY = -15;
   const gap = 0.34;
@@ -1294,159 +1328,19 @@ function buildSurround() {
   // 外侧扶壁：让墙有厚度和节奏
   for (let i = 0; i < 12; i++) {
     const a = (i / 12) * Math.PI * 2 + 0.16;
-    const d = Math.abs(((a - Math.PI + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+    const d = Math.abs(THREE.MathUtils.euclideanModulo(a + Math.PI * 1.5, Math.PI * 2) - Math.PI);
     if (d < gap / 2 + 0.1) continue;
     buildOuterColumn(a, rBot + 1.6);
   }
 
   // 墙面的长幡由 buildBanners() 统一挂在 R + 8.8 处，这里不再重复
 
-  // 北面门桥：桥面 + 圆管扶手 + 桥下三个半圆拱
-  const bridge = new THREE.Mesh(new THREE.BoxGeometry(15, 1.1, 30), matWall);
-  bridge.position.set(0, -1.2, -R - 17);
-  g.add(bridge);
-  for (const sx of [-1, 1]) {
-    const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 30, 8), matWallDark);
-    rail.rotation.x = Math.PI / 2;
-    rail.position.set(sx * 7.4, 0.35, -R - 17);
-    g.add(rail);
-  }
-  for (let k = 0; k < 3; k++) {
-    const arch = new THREE.Mesh(new THREE.TorusGeometry(5, 1.0, 6, 18, Math.PI), matWallDark);
-    arch.position.set(0, -3.2, -R - 6 - k * 10);
-    g.add(arch);
-  }
-
+  buildNorthGate(g, R, architecture);
   scene.add(g);
 }
 buildSurround();
 
-// ═══════════════════════════════════════ 远景哥特要塞
-//  三圈塔楼 + 横跨的拱桥：近圈压住画面边缘，中圈给纵深，远圈只剩剪影
-function buildFortress() {
-  const g = new THREE.Group();
-  const matFar = new THREE.MeshStandardMaterial({ map: texStoneDark, color: 0xaca1ae, roughness: .97, metalness: 0 });
-  const matFarDark = new THREE.MeshStandardMaterial({ map: texStoneDark, color: 0x837c8d, roughness: .99, metalness: 0 });
-  const matSlit = new THREE.MeshBasicMaterial({ color: 0x1a1428 });
-  const foundations = [];
-
-  const tower = (x, z, w, h, d, mat, spires = true) => {
-    const base = -34;
-    const t = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.46, w * 0.55, h, 8), mat);
-    t.position.set(x, base + h / 2, z);
-    g.add(t);
-    // 收分（塔身上窄下宽）
-    const upper = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.34, w * 0.44, h * 0.26, 8), matFarDark);
-    upper.position.set(x, base + h + h * 0.13, z);
-    g.add(upper);
-    // 束带：把一段圆柱切成几层，远看才有「塔」的节奏
-    for (let k = 1; k <= 3; k++) {
-      const yy = base + (h * k) / 4;
-      const band = new THREE.Mesh(new THREE.TorusGeometry(w * 0.5, w * 0.055, 6, 20), matFarDark);
-      band.rotation.x = -Math.PI / 2;
-      band.position.set(x, yy, z);
-      g.add(band);
-    }
-    // 窗缝：深色竖条，绕着塔身排一圈
-    for (let k = 0; k < 8; k++) {
-      const a2 = (k / 8) * Math.PI * 2;
-      const slit = new THREE.Mesh(
-        new THREE.PlaneGeometry(w * 0.12, h * 0.22),
-        matSlit   // 共享材质，否则 48 座塔 × 8 扇 = 384 个材质，永远合不了批
-      );
-      slit.position.set(x + Math.cos(a2) * (w * 0.47), base + h * 0.52, z + Math.sin(a2) * (w * 0.47));
-      slit.lookAt(x, base + h * 0.52, z);
-      g.add(slit);
-    }
-
-    foundations.push({ x, z, width: w });
-    if (spires) {
-      const spire = new THREE.Mesh(new THREE.ConeGeometry(w * 0.5, h * 0.34, 4), matFarDark);
-      spire.position.set(x, base + h + h * 0.34, z);
-      spire.rotation.y = Math.PI / 4;
-      g.add(spire);
-      // 尖顶基座的四座小塔
-      for (let k = 0; k < 4; k++) {
-        const a3 = (k / 4) * Math.PI * 2 + Math.PI / 4;
-        const pin = new THREE.Mesh(new THREE.ConeGeometry(w * 0.09, h * 0.1, 4), matFarDark);
-        pin.position.set(x + Math.cos(a3) * w * 0.42, base + h + h * 0.09, z + Math.sin(a3) * w * 0.42);
-        g.add(pin);
-      }
-    }
-    return t;
-  };
-
-  // 近圈：8 座巨型塔，正好在画面四周立起来
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2 + 0.28;
-    const r = 132 + (i % 2) * 26;
-    const w = 13 + (i % 3) * 4;
-    tower(Math.cos(a) * r, Math.sin(a) * r, w, 62 + (i % 4) * 12, w * 1.15, matFarDark);
-  }
-  // 中圈：16 座，给纵深和错落
-  for (let i = 0; i < 16; i++) {
-    const a = (i / 16) * Math.PI * 2 + 0.12;
-    const r = 210 + (i % 4) * 26;
-    const w = 8 + (i % 5) * 2.5;
-    tower(Math.cos(a) * r, Math.sin(a) * r, w, 58 + (i % 5) * 22, w, i % 3 ? matFar : matFarDark);
-  }
-  // 远圈：24 座，只留雾里的剪影
-  for (let i = 0; i < 24; i++) {
-    const a = (i / 24) * Math.PI * 2 + 0.7;
-    const r = 200 + (i % 6) * 34;
-    const w = 12 + (i % 4) * 6;
-    tower(Math.cos(a) * r, Math.sin(a) * r, w, 70 + (i % 6) * 26, w, matFar, false);
-  }
-
-  // 北面主门楼：两座高塔夹一道拱门，门洞里透红光（对应参考图正上方城门）
-  const gateZ = -R - 46;
-  tower(-21, gateZ, 20, 104, 20, matFarDark);
-  tower(21, gateZ, 20, 104, 20, matFarDark);
-  const arch = new THREE.Mesh(new THREE.TorusGeometry(16, 3.4, 8, 30, Math.PI), matFarDark);
-  arch.position.set(0, 30, gateZ);
-  g.add(arch);
-  // 门楼两侧垂下的猩红长幡
-  for (const sx of [-1, 1]) {
-    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 34, 10, 17), clothMaterial);
-    cloth.position.set(sx * 12.5, 30, gateZ + 9);
-    g.add(cloth);
-  }
-
-  // Floating towers are anchored into jagged stone islands beneath their masonry.
-  const foundationGeometry = new THREE.CylinderGeometry(1, .28, 1, 9, 4);
-  const vertices = foundationGeometry.attributes.position;
-  for (let i = 0; i < vertices.count; i++) {
-    const x = vertices.getX(i), y = vertices.getY(i), z = vertices.getZ(i);
-    const surface = 1 + .16 * Math.sin(x * 8 + y * 12) * Math.cos(z * 9 - y * 8);
-    vertices.setXYZ(i, x * surface + .17 * (y - .5), y, z * surface);
-  }
-  foundationGeometry.computeVertexNormals();
-  const foundationsMesh = new THREE.InstancedMesh(foundationGeometry, matFarDark, foundations.length);
-  const instance = new THREE.Object3D();
-  for (const [i, { x, z, width }] of foundations.entries()) {
-    const height = width * (.76 + i % 4 * .16);
-    instance.position.set(x, -34 + .45 - height * .5, z);
-    instance.rotation.y = i * 1.43;
-    instance.scale.set(width * .72, height, width * .68);
-    instance.updateMatrix();
-    foundationsMesh.setMatrixAt(i, instance.matrix);
-  }
-  g.add(foundationsMesh);
-
-  // 横跨的拱桥：左右各两道，参考图两侧那些高架拱
-  const bridges = [
-    [0.35, 96, 34, 22], [2.55, 108, 40, 24], [3.9, 88, 28, 18], [5.5, 120, 44, 26],
-  ];
-  for (const [a, r, span, y] of bridges) {
-    const b = new THREE.Mesh(new THREE.TorusGeometry(span, 2.4, 6, 26, Math.PI * 0.62), matFarDark);
-    b.position.set(Math.cos(a) * r, y, Math.sin(a) * r);
-    b.rotation.y = -a;
-    g.add(b);
-  }
-
-  scene.add(g);
-}
-buildFortress();
+buildOuterFortress(scene, R, architecture, clothMaterial);
 
 // ═══════════════════════════════════════ 光
 function buildLights() {
@@ -1521,7 +1415,7 @@ buildLights();
     if (material.transparent || material.alphaTest > 0) guardFromAO(object, material);
   });
   return {
-    radius: R, root, obstacles, setPhase: setStagePhase,
+    radius: R, root, obstacles, impactSurface, setPhase: setStagePhase,
     setDecor(on) { for (const object of REFS.decor) object.visible = on; },
   };
 }

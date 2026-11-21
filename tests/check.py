@@ -2,7 +2,7 @@
 """Headless acceptance check: screenshots + console errors + guard/parry window capture."""
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://localhost:5173/?autostart=1"
 OUT = "tests"
 
 with sync_playwright() as p:

@@ -180,6 +180,18 @@ const PRECISION = QSP.get('prec') === 'high' ? 'highp' : 'mediump';
 const renderer = new THREE.WebGLRenderer({ antialias: false, precision: PRECISION, powerPreference: 'high-performance' });
 // ── 画质开关（URL 参数）：?res=0.75 渲染倍率 / ?ao=0 关环境光遮蔽 / ?shadow=0 关阴影
 const QS = new URLSearchParams(location.search);
+let atTitle = !grabTestMode && !QS.has('debug') && QS.get('autostart') !== '1';
+const titleScreen = document.getElementById('titleScreen');
+const startButton = document.getElementById('startGame');
+const exitToTitle = document.getElementById('exitToTitle');
+function setTitleVisible(visible) {
+  atTitle = visible;
+  titleScreen.hidden = !visible;
+  document.body.classList.toggle('on-title', visible);
+  exitToTitle.hidden = visible || grabTestMode;
+}
+titleScreen.hidden = !atTitle;
+document.body.classList.toggle('on-title', atTitle);
 const RES = Math.min(1.5, Math.max(0.5, parseFloat(QS.get('res') || '1')));
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2.0) * RES);
 renderer.info.autoReset = false;   // 自己每帧重置，才能在渲染后读到当帧的 draw call
@@ -452,7 +464,7 @@ function clearInput() {
   clearBufferedInput();
 }
 addEventListener('keydown', (e) => {
-  if (settingsOpen() || window.__recordingKey) return;
+  if (!combatReady || settingsOpen() || window.__recordingKey) return;
   if (grabTestMode && e.code === 'KeyG') {
     e.preventDefault();
     if (!e.repeat && !gui.domElement.contains(document.activeElement)) startGrabTest();
@@ -474,7 +486,7 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => keys.delete(e.code));
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('mousedown', e => {
-  if (settingsOpen() || CFG.paused) return;
+  if (!combatReady || settingsOpen() || CFG.paused) return;
   e.preventDefault();
   if (!document.pointerLockElement) canvas.requestPointerLock?.()?.catch(() => {});
   press('Mouse' + e.button);
@@ -486,12 +498,12 @@ document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
   if (hadPointerLock && !locked) {
     clearInput();
-    if (!grabTestMode && !settingsOpen()) settings.open(true);
+    if (combatReady && !grabTestMode && !settingsOpen()) settings.open(true);
   }
   hadPointerLock = locked;
 });
 canvas.addEventListener('mousemove', e => {
-  if (settingsOpen() || CFG.paused || player.lockOn || bossIntro) return;
+  if (!combatReady || settingsOpen() || CFG.paused || player.lockOn || bossIntro) return;
   const speed = 0.0025 * settings.state().sensitivity;
   const deltaYaw = -e.movementX * speed;
   if (railOrbit && !grabSequence) railOrbit.mouseYaw += deltaYaw;
@@ -2383,7 +2395,9 @@ function loop(now) {
   const dtReal = THREE.MathUtils.clamp((now - lastTime) / 1000, 0, 0.1);
   lastTime = now;
 
-  if (bossIntro) {
+  if (atTitle) {
+    frameTitle(now);
+  } else if (bossIntro) {
     if (!CFG.paused) bossIntro.advance(dtReal * CFG.timeScale);
     bossIntro.frameCamera(camera, settings.state().fov);
     if (bossIntro.finished) finishBossIntro();
@@ -2814,8 +2828,61 @@ function resetFight() {
 //     带参数   → 用真模型替换外观，帧数据与判定完全不变
 //     用法：?p=assets/hero.glb&ps=1.0&b=assets/boss.glb&bs=2.6
 // ═══════════════════════════════════════════════════════════════
-let combatReady = false;
-(async function attachModels() {
+let combatReady = false, assetsReady = false;
+const menuTime = performance.now();
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function frameTitle(now) {
+  const drift = reducedMotion.matches ? 0 : Math.sin((now - menuTime) * .00022);
+  const wide = camera.aspect > 1.2;
+  camera.position.set(-9.5 + drift * 2.1, 14.0 + drift * .70, 34.5);
+  camera.lookAt(wide ? -26 : -3.7, wide ? 26 : 34, -59);
+}
+
+function startGame() {
+  if (!assetsReady || combatReady || (atTitle && settingsOpen())) return;
+  const fromTitle = atTitle;
+  combatReady = true;
+  setTitleVisible(false);
+  document.body.classList.remove('booting');
+  resetFight();
+  for (const actor of [player, boss]) actor.mesh.group.visible = true;
+  if (!grabTestMode && boss.weapon) {
+    bossIntro = createBossIntro(scene, boss, camera, STAGE.impactSurface);
+    if (bossIntro) document.body.classList.add('boss-intro');
+  }
+  lastTime = performance.now();
+  if (fromTitle) canvas.focus({ preventScroll: true });
+  if (!bossIntro) banner(frameIssues.length ? `帧数据越界 ${frameIssues.length} 项 · 见 console` : '点击战斗画面捕获鼠标', 1800);
+}
+
+function returnToTitle() {
+  if (!combatReady || grabTestMode) return;
+  combatReady = false;
+  settings.open(false);
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  CFG.paused = false;
+  clearInput();
+  acc = 0;
+  resetFight();
+  player.mesh.group.visible = boss.mesh.group.visible = false;
+  setTitleVisible(true);
+  frameTitle(performance.now());
+  startButton.focus({ preventScroll: true });
+}
+
+function completeLoading() {
+  assetsReady = true;
+  startButton.disabled = false;
+  const status = document.getElementById('titleLoading');
+  status.textContent = status.dataset.fallback ? '部分模型未能加载，仍可开始游戏' : '';
+  if (!atTitle) {
+    startGame();
+    return;
+  }
+  if (!settingsOpen() && document.activeElement === document.body) startButton.focus({ preventScroll: true });
+}
+
+async function attachModels() {
   const q = new URLSearchParams(location.search);
 
   // 默认就加载完整美术资源：模型 + 武器 + 动捕包。
@@ -2833,8 +2900,8 @@ let combatReady = false;
   const bossWeaponUrl = !wantWeapon ? null : (q.get('bwp') === 'none' ? weaponUrl : (q.get('bwp') ?? 'assets/greatsword.glb'));
   const wantAnim = !graybox && q.get('anim') !== '0';
   if (!pUrl && !bUrl) {
-    combatReady = true;
-    document.body.classList.remove('booting');
+    player.mesh.group.visible = boss.mesh.group.visible = false;
+    completeLoading();
     return;
   }
 
@@ -3019,25 +3086,13 @@ let combatReady = false;
 
     if (boss.binder && bUrl === 'assets/boss_model_v2.glb') tintBossFace(boss.binder.root);
     setupDragWeapon();
-    banner('模型就位', 1200);
-    if (!grabTestMode && boss.weapon) {
-      snapCamera();
-      bossIntro = createBossIntro(scene, boss, camera);
-      if (bossIntro) {
-        document.body.classList.add('boss-intro');
-        bannerEl.classList.remove('show');
-      }
-    }
   } catch (err) {
     console.warn('[asset] 模型加载失败，保持灰盒：', err);
-    banner('模型加载失败，保持灰盒', 2200);
+    document.getElementById('titleLoading').dataset.fallback = 'true';
   } finally {
-    clearInput();
-    for (const actor of actors) actor.mesh.group.visible = true;
-    combatReady = true;
-    document.body.classList.remove('booting');
+    completeLoading();
   }
-})();
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 启动
@@ -3079,8 +3134,12 @@ const settings = createSettings({
 });
 window.__settingsApi = settings;
 settings.bind();
+canvas.tabIndex = -1;
+startButton.addEventListener('click', startGame);
+exitToTitle.addEventListener('click', returnToTitle);
+document.getElementById('titleSettings').addEventListener('click', () => settings.open(true));
 // 预编译所有材质的着色器，避免第一次看到某个物体时卡一下
 renderer.compile(scene, camera);
 snapCamera();
 requestAnimationFrame(loop);
-banner(frameIssues.length ? `帧数据越界 ${frameIssues.length} 项 · 见 console` : '点击战斗画面开始', 1800);
+attachModels();
