@@ -4,6 +4,7 @@ import { CFG, MOVES, LIMITS, GRAB_TIMING, totalFrames, motionAt, dumpJSON, moveI
 import { makeFighter, createViz, placeViz, applyPose } from './graybox.js';
 import { buildStage, updateStage, ARENA_R } from './arena/stage.js';
 import { createSettings } from './settings.js';
+import { createBossIntro, tintBossFace } from './boss-intro.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
@@ -12,12 +13,12 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
-import { poseFor } from './pose.js';
+import { DEATH_POSE_FRAMES, poseFor } from './pose.js';
 import { FootIK } from './footik.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 import { guardFromAO } from './vfx/ao-guard.js';
 import { GroundScratch } from './vfx/scratch.js';
-import { clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim } from './grab-combo.js';
+import { clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
 
 // ═══════════════════════════════════════════════════════════════
 //  0.0 调参持久化（帧数据 / 全局 CFG / 特效）
@@ -347,13 +348,6 @@ function applyQuality(name) {
   gtao.enabled = q.ao && QSP.get('ao') !== '0';   // URL 的 ?ao=0 优先，别被画质档覆盖
   gtao.setSize(innerWidth, innerHeight);
   STAGE.setDecor(q.decor);
-  const el = document.getElementById('banner');
-  if (el) {
-    el.textContent = `画质：${q.label}`;
-    el.classList.add('show');
-    clearTimeout(applyQuality._t);
-    applyQuality._t = setTimeout(() => el.classList.remove('show'), 900);
-  }
 }
 addEventListener('keydown', (e) => {
   if (!document.getElementById('settings').classList.contains('open') && e.key.toLowerCase() === 'q') {
@@ -361,6 +355,7 @@ addEventListener('keydown', (e) => {
     const next = order[(order.indexOf((window.__settingsApi?.state().preset) || qualityName) + 1) % order.length];
     if (window.__settingsApi) window.__settingsApi.applyPreset(next);
     else applyQuality(next);
+    banner(`画质 · ${QUALITY[next].label}`, 900);
   }
 });
 applyQuality(qualityName);
@@ -439,10 +434,11 @@ function rebuildKeymap() {
 rebuildKeymap();
 
 let grabSequence = null;
+let bossIntro = null;
 const canvas = renderer.domElement;
 const settingsOpen = () => document.getElementById('settings').classList.contains('open');
 function press(code) {
-  if (keys.has(code)) return;
+  if (bossIntro || player.state === 'dead' || keys.has(code)) return;
   keys.add(code);
   const action = KEYMAP[code];
   if (action === 'lock') player.lockOn = !player.lockOn;
@@ -495,9 +491,11 @@ document.addEventListener('pointerlockchange', () => {
   hadPointerLock = locked;
 });
 canvas.addEventListener('mousemove', e => {
-  if (settingsOpen() || CFG.paused || player.lockOn) return;
+  if (settingsOpen() || CFG.paused || player.lockOn || bossIntro) return;
   const speed = 0.0025 * settings.state().sensitivity;
-  camYaw = (camYaw - e.movementX * speed) % (2 * Math.PI);
+  const deltaYaw = -e.movementX * speed;
+  if (railOrbit && !grabSequence) railOrbit.mouseYaw += deltaYaw;
+  else camYaw = (camYaw + deltaYaw) % (2 * Math.PI);
   camPitch = THREE.MathUtils.clamp(camPitch + e.movementY * speed, -0.26, 1.05);
 });
 
@@ -561,7 +559,6 @@ class Actor {
     this.move = moveId ? MOVES[moveId] : null;
     this.hitSet.clear();
     if (name === 'roll') { this.iframe = CFG.playerIframe; this.rollTotal = CFG.rollTotal; }
-    if (name === 'dead') this.frame = 0;
   }
 
   /** 单帧推进：位移 + 计时器 */
@@ -575,9 +572,14 @@ class Actor {
 
   translate(dist) {
     const f = this.forward;
-    this.pos.x += f.x * dist;
-    this.pos.z += f.z * dist;
-    this.clampToArena();
+    // 将大步拆开，避免快速翻滚或突进一步跨过障碍。
+    const steps = Math.max(1, Math.ceil(Math.abs(dist) / this.hurt.radius));
+    const step = dist / steps;
+    for (let i = 0; i < steps; i++) {
+      this.pos.x += f.x * step;
+      this.pos.z += f.z * step;
+      this.clampToArena();
+    }
   }
 
   /**
@@ -585,21 +587,31 @@ class Actor {
    * 沿径向夹住，贴边时顺着圆滑走，不像方形 clamp 那样卡在角上。
    */
   clampToArena() {
-    // ① 先解圆柱障碍（断柱 / 倒柱）：挡住就沿法线推出去，能贴着绕
-    for (const o of STAGE.obstacles) {
-      const dx = this.pos.x - o.x, dz = this.pos.z - o.z;
-      const min = o.r + this.hurt.radius;
-      const d = Math.hypot(dx, dz);
-      if (d < min) {
-        if (d > 1e-4) {
-          const k = min / d;
-          this.pos.x = o.x + dx * k;
-          this.pos.z = o.z + dz * k;
-        } else {
-          // 正好在柱心：没有方向可推，朝 +X 推到边缘
-          this.pos.x = o.x + min;
-        }
+    // ① 在障碍的局部平面求最近点。立柱使用半径，倒柱使用有长度和朝向的矩形。
+    const clamp = THREE.MathUtils.clamp;
+    for (const { x, z, r = 0, axisX = 1, axisZ = 0, halfLength = 0, halfWidth = 0 } of STAGE.obstacles) {
+      const dx = this.pos.x - x, dz = this.pos.z - z;
+      const along = dx * axisX + dz * axisZ;
+      const across = -dx * axisZ + dz * axisX;
+      let pushX = along - clamp(along, -halfLength, halfLength);
+      let pushZ = across - clamp(across, -halfWidth, halfWidth);
+      const clearance = r + this.hurt.radius;
+      const distance = Math.hypot(pushX, pushZ);
+      if (distance >= clearance) continue;
+
+      if (distance > 1e-4) {
+        const push = clearance / distance - 1;
+        pushX *= push;
+        pushZ *= push;
+      } else if (halfLength - Math.abs(along) <= halfWidth - Math.abs(across)) {
+        pushX = (along < 0 ? -halfLength - clearance : halfLength + clearance) - along;
+        pushZ = 0;
+      } else {
+        pushX = 0;
+        pushZ = (across < 0 ? -halfWidth - clearance : halfWidth + clearance) - across;
       }
+      this.pos.x += pushX * axisX - pushZ * axisZ;
+      this.pos.z += pushX * axisZ + pushZ * axisX;
     }
     // ② 再夹圆形台面
     const lim = ARENA_R - 1.8 - this.hurt.radius;
@@ -614,7 +626,7 @@ class Actor {
   /** 平滑转向，rate = 每帧最大弧度 */
   turnToward(targetYaw, framesFor180) {
     const maxStep = Math.PI / framesFor180;
-    let diff = ((targetYaw - this.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    let diff = THREE.MathUtils.euclideanModulo(targetYaw - this.yaw + Math.PI, Math.PI * 2) - Math.PI;
     diff = THREE.MathUtils.clamp(diff, -maxStep, maxStep);
     this.yaw += diff;
   }
@@ -706,8 +718,8 @@ function activeHitbox(actor) {
 }
 
 function resolveHit(attacker, defender, hb) {
-  if (!hb || (defender === player && grabSequence)) return;
-  if (attacker.move.grab && defender.state === 'dead') return;
+  if (!hb || attacker.state === 'dead' || defender.state === 'dead') return;
+  if (defender === player && grabSequence) return;
   const hitKey = hb.strike.index + ':' + defender.name;
   if (attacker.hitSet.has(hitKey)) return;
   if (defender.iframe > 0) return;
@@ -734,7 +746,7 @@ function resolveHit(attacker, defender, hb) {
 // ── Boss 超霸体 ──────────────────────────────────────────────
 // 2 秒内连续受击 5 次 → 触发「超霸体」，持续 10 秒。
 //   超霸体期间：不产生受击僵直（血量照扣），出招也不会延长超霸体。
-// 另外：Boss 只要在出招，整段攻击都是霸体，不会被玩家的攻击打断。
+// 出招时普通命中无法打断 Boss，成功弹反单独结算。
 const BOSS_ARMOR = { windowFrames: 120, maxStuns: 5, durationFrames: 600 };
 
 /** 记一次僵直；返回 true 表示这次应该免疫（已经霸体 / 刚触发霸体） */
@@ -767,17 +779,36 @@ function bossArmored() {
   return logicFrame < (boss.armorUntil ?? -1);
 }
 
+function finishDeath(actor, frame = 0) {
+  if (actor.hp > 0 || actor.state === 'dead') return;
+  actor.hp = 0;
+  actor.setState('dead');
+  actor.frame = frame;
+  actor.moving = false;
+  actor.speed = 0;
+
+  if (actor === player) {
+    clearInput();
+    player.lockOn = false;
+    if (boss.state !== 'dead') {
+      boss.setState('idle');
+      boss.moving = false;
+      boss.speed = 0;
+    }
+  }
+  banner(actor === player ? '你死了' : '击败首领', 2200, actor === player ? 'defeat' : 'victory');
+}
+
 function applyDamage(attacker, defender, move) {
   // 玩家格挡 / 弹反窗口
   if (defender === player && player.state === 'block') {
     const parryEnd = 8;
     if (player.frame <= parryEnd) {
-      // 弹反成功
+      // 弹反中断当前招式，并给玩家固定的反击窗口。
       boss.poise = Math.max(0, boss.poise - 60);
-      if (!registerBossStun() && boss.state !== 'attack') {   // 超霸体 / 出招中都不吃僵直
-        boss.setState('hitstun');
-        boss.stunTimer = 90;
-      }
+      boss.setState('parried');
+      boss.stunTimer = 90;
+      boss.moving = false;
       player.iframe = 20;
       shake(0.14);
       hitstop(HITSTOP_HEAVY());
@@ -786,19 +817,19 @@ function applyDamage(attacker, defender, move) {
       return;
     }
     // 普通格挡：减伤 80%，削减韧性
-    defender.hp -= move.damage * 0.2;
+    defender.hp = Math.max(0, defender.hp - move.damage * 0.2);
     defender.poise -= move.damage * 0.14;
-    defender.setState('hitstun');
-    defender.stunTimer = 14;
-    if (defender.poise <= 0) {
-      defender.setState('guardbreak');
-      defender.stunTimer = 60;
-      defender.poise = defender.maxPoise * 0.5;   // 破防后回一半，避免连锁破防
+    if (defender.hp > 0) {
+      const broken = defender.poise <= 0;
+      defender.setState(broken ? 'guardbreak' : 'hitstun');
+      defender.stunTimer = broken ? 60 : 14;
+      if (broken) defender.poise = defender.maxPoise * 0.5;
     }
     shake(0.05);
     hitstop(HITSTOP_LIGHT());
     vfx.guard(player, attacker);
     flash(defender);
+    finishDeath(defender);
     return;
   }
 
@@ -810,11 +841,12 @@ function applyDamage(attacker, defender, move) {
     shake(0.05);
     hitstop(HITSTOP_LIGHT());
     vfx.guard(boss, attacker);
-    if (defender.poise <= 0) {
+    if (defender.hp > 0 && defender.poise <= 0) {
       defender.setState('hitstun');
       defender.stunTimer = 40;
       defender.poise = defender.maxPoise * 0.5;
     }
+    finishDeath(defender);
     return;
   }
 
@@ -825,9 +857,12 @@ function applyDamage(attacker, defender, move) {
   //   · 超霸体生效中 → 不产生受击僵直
   //   · 正在出招     → 整段攻击都是霸体，不会被打断
   // 两种情况血量都照扣。
-  const bossImmune = defender === boss ? registerBossStun() : false;
+  // 反击照常结算伤害和削韧，保留正在进行的弹反硬直。
+  const bossParried = defender === boss && boss.state === 'parried';
+  const bossImmune = defender === boss && (bossParried || registerBossStun());
   const bossAttacking = defender === boss && boss.state === 'attack';
-  if (!bossImmune && !bossAttacking) {
+  const canStagger = !bossImmune && !bossAttacking;
+  if (defender.hp > 0 && canStagger) {
     defender.setState('hitstun');
     defender.stunTimer = move.hitstun;
   }
@@ -835,7 +870,7 @@ function applyDamage(attacker, defender, move) {
 
   // 削韧满：强制长硬直
   if (defender.poise <= 0 && defender === boss) {
-    if (!bossImmune && !bossAttacking) defender.stunTimer = 110;   // 超霸体 / 出招中都免疫
+    if (canStagger) defender.stunTimer = 110;
     defender.poise = defender.maxPoise;
   }
 
@@ -849,10 +884,7 @@ function applyDamage(attacker, defender, move) {
   hitstop(dmg > 200 ? HITSTOP_HEAVY() : HITSTOP_LIGHT());
   flash(defender);
 
-  if (defender.hp <= 0) {
-    defender.setState('dead');
-    banner(defender === boss ? '击败' : '你死了', 2200, defender === player);
-  }
+  finishDeath(defender);
 }
 
 function flash(a) { a.flashTimer = 4; }
@@ -861,6 +893,7 @@ function flash(a) { a.flashTimer = 4; }
 //  5. 玩家状态机
 // ═══════════════════════════════════════════════════════════════
 function screenBasis() {
+  // 栏杆避让只调整镜头构图，移动和翻滚沿用鼠标控制的视角方向。
   const fwd = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   if (player.lockOn) {
     const target = boss.pos.clone().sub(player.pos).setY(0);
@@ -871,6 +904,7 @@ function screenBasis() {
 
 function playerTick() {
   if (player.flashTimer > 0) player.flashTimer--;
+  if (player.state === 'dead') { player.frame++; return; }
   if (grabSequence) { player.frame++; return; }
   if (player.iframe > 0) player.iframe--;
 
@@ -882,7 +916,6 @@ function playerTick() {
   }
 
   switch (player.state) {
-    case 'dead': player.frame++; return;
 
     case 'hitstun':
     case 'guardbreak':
@@ -999,8 +1032,6 @@ function applyMoveInput(speedScale = 1) {
   const axisScale = (player.lockOn && fwdInput < 0) ? 0.452 : 1.0;   // 锁定后退 ≈1.90 m/s
   const speed = CFG.runSpeed * speedScale * axisScale;
 
-  player.moving = true;
-  player.speed = speed;
   player.moveAxis = fwdInput;     // +1 前 / -1 后 / 0 只有横移，给动画选 clip 用
   player.strafeAxis = strafeInput;
 
@@ -1009,13 +1040,21 @@ function applyMoveInput(speedScale = 1) {
     .addScaledVector(right, strafeInput)
     .normalize();
 
+  const { x: startX, z: startZ } = player.pos;
   player.pos.addScaledVector(dir, speed / 60);
   player.clampToArena();
 
-  // 朝向 = 移动方向（S 也是移动方向，不再背对着倒着走）
+  // 碰撞会吃掉向墙的步长。用实际位移选动画和朝向，贴栏杆时沿边转身。
+  const dx = player.pos.x - startX;
+  const dz = player.pos.z - startZ;
+  const distance = Math.hypot(dx, dz);
+  player.moving = distance > 1e-4;
+  player.speed = player.moving ? distance * 60 : 0;
+  if (!player.moving) return false;
+
   const targetYaw = player.lockOn
     ? Math.atan2(fwd.x, fwd.z)
-    : Math.atan2(dir.x, dir.z);
+    : Math.atan2(dx, dz);
   player.turnToward(targetYaw, player.lockOn ? 16 : 12);
   return true;
 }
@@ -1185,8 +1224,7 @@ function advanceGrab() {
   clearBufferedInput();
   player.pos.y = 0;
   if (player.hp <= 0) {
-    player.setState('dead');
-    banner('你死了', 2200, true);
+    finishDeath(player, player.binder ? 0 : DEATH_POSE_FRAMES);
   } else {
     player.setState('idle');
     player.iframe = 8;
@@ -1408,7 +1446,9 @@ function pickBossMove(dist) {
 
 function bossTick() {
   if (boss.flashTimer > 0) boss.flashTimer--;
-  if (boss.stunTimer > 0) boss.stunTimer--;
+  if (boss.stunTimer > 0 && boss.state !== 'parried') boss.stunTimer--;
+  if (boss.state === 'dead') { boss.frame++; return; }
+  if (player.state === 'dead') return;
 
   const toPlayer = player.pos.clone().sub(boss.pos).setY(0);
   const dist = toPlayer.length();
@@ -1418,8 +1458,6 @@ function bossTick() {
   AI.comboRangeSince = inBossComboRange(toPlayer, dist) ? (AI.comboRangeSince ?? logicFrame) : null;
 
   switch (boss.state) {
-    case 'dead': boss.frame++; return;
-
     case 'recover':
       if (++boss.frame >= boss.recoveryFrames) finishBossAttack(18);
       return;
@@ -1445,6 +1483,13 @@ function bossTick() {
       if (logicFrame >= (AI.blockUntil ?? 0)) {
         boss.setState('idle');
         AI.gapFrames = Math.max(AI.gapFrames, 8);
+      }
+      return;
+
+    case 'parried':
+      if (++boss.frame >= boss.stunTimer) {
+        boss.stunTimer = 0;
+        boss.setState('idle');
       }
       return;
 
@@ -1514,7 +1559,7 @@ function bossTick() {
         boss.moving = false;
         // 二阶段：场景推到血月（法阵转红、雾变浓、火盆变血焰）
         STAGE.setPhase(2);
-        banner('第二阶段 · 血月', 1800);
+        banner('第二阶段 · 血月', 1800, 'phase');
         shakeAmt = Math.max(shakeAmt, 0.9);
         AI.gapFrames = 0;
         return;
@@ -1641,7 +1686,8 @@ function bladeSpan(group) {
   });
   const size = _bladeMax.clone().sub(_bladeMin);
   const axis = size.x >= size.y && size.x >= size.z ? 'x' : (size.y >= size.z ? 'y' : 'z');
-  const span = { axis, lo: _bladeMin[axis], hi: _bladeMax[axis] };
+  const [widthAxis] = ['x', 'y', 'z'].filter(key => key !== axis).sort((a, b) => size[b] - size[a]);
+  const span = { axis, widthAxis, lo: _bladeMin[axis], hi: _bladeMax[axis] };
   group.userData.bladeSpan = span;
   return span;
 }
@@ -1650,9 +1696,8 @@ function bladeSpan(group) {
  * 每帧调用。只要角色处于出招状态就持续采样，
  * 挥得快 → 同一时间窗内扫过的路径更长；停下 → 旧采样自然淡出。
  */
-function feedBladeTrail(key, a, dt) {
+function feedBladeTrail(key, a, dt, swinging = !!a && !a.move?.grab && ATTACK_STATE_RE.test(a.state)) {
   if (!vfx.trails || !vfx.trails[key]) return;
-  const swinging = !!a && !a.move?.grab && ATTACK_STATE_RE.test(a.state);
   const group = a && a.binder && a.binder.weaponGroup;
   if (!swinging || !group) { vfx.feedTrail(key, null, null, dt, false); return; }
 
@@ -1705,7 +1750,8 @@ function tick() {
   // 玩家就会被「推着走」—— 玩家自己走一步，Boss 挤回来半步，净位移全由 Boss 决定。
   const bossDashingToGrab = boss.move?.grab && boss.frame >= boss.move.startup
     && boss.frame < boss.move.startup + boss.move.active;
-  if (!grabSequence && !bossDashingToGrab && player.state !== 'roll' && player.iframe <= 0) {
+  if (!grabSequence && !bossDashingToGrab && player.state !== 'dead' && boss.state !== 'dead'
+    && player.state !== 'roll' && player.iframe <= 0) {
     const dx = player.pos.x - boss.pos.x;
     const dz = player.pos.z - boss.pos.z;
     const d = Math.hypot(dx, dz);
@@ -1746,13 +1792,17 @@ function tick() {
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 const focus = new THREE.Vector3();
-const framing = { distance: 3.15, pivotHeight: 1.48, lockLift: 0.16, shoulder: 0.32, pitch: 0.075 };
+const framing = { distance: 3.15, clearance: 2.4, pivotHeight: 1.48, lockLift: 0.16, shoulder: 0.32, pitch: 0.075 };
 let camYaw = 0;
 let camPitch = framing.pitch;
+let railCameraYaw = null;
+let railOrbit = null;
 
 function snapCamera() {
   camYaw = player.yaw + Math.PI;
   camPitch = framing.pitch;
+  railCameraYaw = null;
+  railOrbit = null;
   camTarget.copy(player.pos);
   camTarget.y += framing.pivotHeight;
   updateCamera(0);
@@ -1785,21 +1835,88 @@ function updateCamera(dtReal) {
     camPitch += (Math.min(camPitch, framing.pitch) - camPitch) * follow;
   }
   camTarget.lerp(focus, follow);
-  const sinYaw = Math.sin(camYaw), cosYaw = Math.cos(camYaw);
-  // 略偏右肩，贴边缩短镜头时仍能从角色旁边看见目标。
-  const shoulder = framing.shoulder;
-  const pivotX = camTarget.x + cosYaw * shoulder;
-  const pivotZ = camTarget.z - sinYaw * shoulder;
-  const radius = framing.distance * Math.cos(camPitch);
-
-  // 沿镜头臂求与栏杆内圈的交点。靠近栏杆时向前收镜，保持原俯仰。
+  const pivotX = camTarget.x + Math.cos(camYaw) * framing.shoulder;
+  const pivotZ = camTarget.z - Math.sin(camYaw) * framing.shoulder;
+  const pitchScale = Math.cos(camPitch);
+  const minBoom = framing.clearance * pitchScale;
   const railRadius = ARENA_R - 1.65;
+  const pivotRadius = Math.hypot(pivotX, pivotZ);
+  const turn = 1 - Math.exp(-10 * dtReal);
+  const freeLook = !player.lockOn && !grabSequence;
+  const mouseYaw = freeLook ? (railOrbit?.mouseYaw ?? 0) : 0;
+  let armYaw = camYaw;
+  let railExtend = null;
+
+  if (pivotRadius + minBoom > railRadius) {
+    railOrbit ??= { mouseYaw: 0, manual: false };
+    railOrbit.mouseYaw = 0;
+    if (!freeLook) railOrbit.manual = false;
+    // 用余弦定理找出保留最短镜头臂时，镜头仍在栏杆内侧的方位范围。
+    const radialYaw = Math.atan2(pivotX, pivotZ);
+    const limitCos = (railRadius ** 2 - pivotRadius ** 2 - minBoom ** 2) / (2 * pivotRadius * minBoom);
+    const minAngle = Math.acos(THREE.MathUtils.clamp(limitCos, -1, 1));
+    const fullTurn = Math.PI * 2;
+    const maxAngle = fullTurn - minAngle;
+    const previous = THREE.MathUtils.euclideanModulo((railCameraYaw ?? camYaw) - radialYaw, fullTurn);
+    const safeAngle = THREE.MathUtils.clamp(previous, minAngle, maxAngle);
+    const maxStep = 4 * dtReal;
+    let next = safeAngle;
+    if (mouseYaw !== 0) {
+      // 从当前可见角度处理鼠标增量，丢弃撞到限位的部分。反向输入从这一侧立即生效。
+      const step = THREE.MathUtils.clamp(mouseYaw, -maxStep, maxStep);
+      next = THREE.MathUtils.clamp(safeAngle + step, minAngle, maxAngle);
+      const appliedYaw = next - safeAngle;
+      if (appliedYaw !== 0) {
+        // 移动方向只跟随实际接受的鼠标输入，镜头自动让位时保持原有朝向基准。
+        camYaw = (camYaw + appliedYaw) % fullTurn;
+        railOrbit.manual = true;
+      }
+    } else if (!railOrbit.manual) {
+      const wanted = THREE.MathUtils.euclideanModulo(camYaw - radialYaw, fullTurn);
+      const target = wanted >= minAngle && wanted <= maxAngle
+        ? wanted
+        : previous < Math.PI ? minAngle : maxAngle;
+      next += THREE.MathUtils.clamp((target - safeAngle) * turn, -maxStep, maxStep);
+    }
+    armYaw = radialYaw + next;
+    if (railOrbit.manual) {
+      const angleToRail = Math.min(next - minAngle, maxAngle - next);
+      railExtend = THREE.MathUtils.smoothstep(angleToRail, 0, 0.35);
+    }
+  } else {
+    railOrbit = null;
+    if (mouseYaw !== 0) camYaw = (camYaw + mouseYaw) % (2 * Math.PI);
+    armYaw = railCameraYaw === null ? camYaw : lerpYaw(railCameraYaw, camYaw, turn);
+  }
+  const yawOffset = lerpYaw(camYaw, armYaw, 1) - camYaw;
+  railCameraYaw = Math.abs(yawOffset) > 0.001 ? armYaw : null;
+  armYaw = railCameraYaw ?? camYaw;
+
+  const sinYaw = Math.sin(armYaw), cosYaw = Math.cos(armYaw);
   const along = pivotX * sinYaw + pivotZ * cosYaw;
   const across = pivotX * cosYaw - pivotZ * sinYaw;
   const toRail = Math.sqrt(Math.max(0, railRadius ** 2 - across ** 2)) - along;
-  const boom = THREE.MathUtils.clamp(toRail, 0.1, radius);
+  // 侧移时先维持短镜头臂，等朝向恢复后再伸回肩后距离。
+  const extend = railExtend ?? (1 - THREE.MathUtils.smoothstep(Math.abs(yawOffset), 0, 0.45));
+  const desiredBoom = THREE.MathUtils.lerp(minBoom, framing.distance * pitchScale, extend);
+  const boom = THREE.MathUtils.clamp(toRail, 0.1, desiredBoom);
   camPos.set(pivotX + boom * sinYaw, camTarget.y + boom * Math.tan(camPitch), pivotZ + boom * cosYaw);
   camPos.y = Math.max(camPos.y, 0.45);
+
+  let aimX = pivotX, aimZ = pivotZ;
+  if (railCameraYaw !== null && player.lockOn && !grabSequence) {
+    const aimYaw = armYaw + Math.PI;
+    const bossYaw = Math.atan2(boss.pos.x - camPos.x, boss.pos.z - camPos.z);
+    const delta = lerpYaw(aimYaw, bossYaw, 1) - aimYaw;
+    const halfFov = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)) * camera.aspect);
+    const playerYaw = Math.atan2(player.pos.x - camPos.x, player.pos.z - camPos.z);
+    const halfSpan = Math.abs(lerpYaw(bossYaw, playerYaw, 0.5) - bossYaw);
+    const margin = THREE.MathUtils.clamp(halfSpan, halfFov * 0.75, halfFov * 0.94);
+    // 镜头侧移时适当朝 Boss 转向，给锁定目标留出画面空间。
+    const yaw = aimYaw + delta - THREE.MathUtils.clamp(delta, -margin, margin);
+    aimX = camPos.x + Math.sin(yaw) * boom;
+    aimZ = camPos.z + Math.cos(yaw) * boom;
+  }
 
   const shakeVec = new THREE.Vector3(
     (Math.random() - 0.5) * shakeAmt,
@@ -1807,7 +1924,7 @@ function updateCamera(dtReal) {
     (Math.random() - 0.5) * shakeAmt
   );
   camera.position.copy(camPos).add(shakeVec);
-  camera.lookAt(pivotX, camTarget.y, pivotZ);
+  camera.lookAt(aimX, camTarget.y, aimZ);
   shakeAmt *= 0.86;
 }
 
@@ -1851,7 +1968,7 @@ function applyActorPose(a, dtReal, getUp = 0) {
   const grounded =
     a.state === 'idle' || a.state === 'move' || a.state === 'block' ||
     a.state === 'attack' || a.state === 'light1' || a.state === 'light2' ||
-    a.state === 'heavy' || a.state === 'hitstun' || a.state === 'guardbreak';
+    a.state === 'heavy' || a.state === 'hitstun' || a.state === 'guardbreak' || a.state === 'parried';
 
   a.footIK.setEnabled(grounded);
   if (grounded) a.footIK.update(a, dtReal);
@@ -1936,7 +2053,7 @@ const DRAG = {
   enabled: true,
   back: 0.02,     // （旧逻辑用，现已不生效：握把直接跟手骨）
   height: 0,      // （旧逻辑用，现已不生效：握把高度由手的位置决定）
-  tipLen: 0,      // 刀刃落点距离；0 = 按身高自动（1.02H），只影响地面划痕位置
+  tipLen: 0,      // 手到刀尖的距离；0 = 自动测量。
   ground: true,   // 拖地模式：俯角按「握把离地高度」反算，刀尖永远正好落在 y = 0
   side: 0.30,     // 刀杆侧偏角（弧度）：绕竖轴把刀甩到斜后方，刀尖朝外；负值换边
   elev: 0.15,     // 只在 ground=false 时生效：固定俯角
@@ -1949,7 +2066,6 @@ const _dragAxisY = new THREE.Vector3(0, 1, 0);
 const _dragQuat = new THREE.Quaternion();
 const _dragRoll = new THREE.Quaternion();
 const _dragHandQuat = new THREE.Quaternion();
-const _dragLocalQuat = new THREE.Quaternion();
 const _dragHandPos = new THREE.Vector3();
 const _dragRefX = new THREE.Vector3();
 const _dragRefZ = new THREE.Vector3();
@@ -2019,6 +2135,7 @@ function setupDragWeapon() {
   dragState = {
     obj: w,
     hand: w.parent,
+    poseGrip: swordGripPose(w.parent),
     pos: w.position.clone(),
     quat: w.quaternion.clone(),
     scale: w.scale.clone(),
@@ -2029,9 +2146,17 @@ function setupDragWeapon() {
   };
 }
 
-function updateDragWeapon() {
+function dragDirection(yaw, length, tipClearance) {
+  const vertical = DRAG.ground
+    ? -THREE.MathUtils.clamp(_dragHandPos.y - tipClearance, 0.05, length * 0.92) / length
+    : -Math.sin(DRAG.elev);
+  const horizontal = Math.sqrt(Math.max(0, 1 - vertical * vertical));
+  _dragDir.set(Math.sin(yaw) * horizontal, vertical, Math.cos(yaw) * horizontal);
+}
+
+function updateDragWeapon(intro) {
   const d = dragState;
-  if (!d) return;
+  if (!d || (intro && !intro.landed)) return;
 
   // Boss 只有 idle（含踱步/绕圈）和 move 算「非战斗」
   const wantDrag = DRAG.enabled && (boss.state === 'idle' || boss.state === 'move');
@@ -2057,6 +2182,15 @@ function updateDragWeapon() {
     d.pos.copy(d.obj.position);      // 记下进入拖刀前的握持姿态
     d.quat.copy(d.obj.quaternion);
     d.scale.copy(d.obj.scale);
+    const palm = d.obj.userData.weapon?.target;
+    const span = bladeSpan(d.obj);
+    d.tipLength = 0;
+    if (palm && span.axis === 'y') {
+      const grip = d.obj.worldToLocal(d.hand.localToWorld(palm.clone()));
+      if (grip.y - span.lo < span.hi - grip.y) {
+        d.tipLength = (span.hi - grip.y) * d.obj.getWorldScale(_dragRefX).y;
+      }
+    }
   }
 
   // ★ 关键：武器始终是手骨的子节点，不摘下来 —— boss 是「抓着手柄拖」，
@@ -2067,25 +2201,23 @@ function updateDragWeapon() {
 
   // 握把世界坐标（= 手骨世界矩阵 × 握把局部位置）
   d.hand.updateWorldMatrix(true, false);
-  _dragHandPos.copy(d.pos).applyMatrix4(d.hand.matrixWorld);
+  _dragHandPos.copy(d.obj.userData.weapon?.target ?? d.pos).applyMatrix4(d.hand.matrixWorld);
 
   // 握把 → 刀尖的实际长度
-  const L = DRAG.tipLen > 0 ? DRAG.tipLen : (d.heightRef || 1.9) * 1.02;
+  const L = DRAG.tipLen > 0 ? DRAG.tipLen : d.tipLength || (d.heightRef || 1.9) * 1.02;
 
   // 水平方向：正后方（yaw + π）绕竖轴偏 DRAG.side
   const yaw = boss.yaw;
   const az = yaw + Math.PI + DRAG.side;
-  const hx = Math.sin(az), hz = Math.cos(az);
 
-  if (DRAG.ground) {
-    // ★ 拖地：俯角不写死，按「握把离地多高」反算 —— 刀尖的水平投影 flat 满足
-    //   flat² + drop² = L²，于是刀尖永远正好落在 y = 0：手抬高、放低都不会悬空或插进地里。
-    const drop = Math.min(Math.max(_dragHandPos.y, 0.05), L * 0.92);
-    const flat = Math.sqrt(Math.max(0.01, L * L - drop * drop));
-    _dragDir.set(hx * flat / L, -drop / L, hz * flat / L).normalize();
-  } else {
-    const ce = Math.cos(DRAG.elev), se = Math.sin(DRAG.elev);
-    _dragDir.set(hx * ce, -se, hz * ce).normalize();
+  const bevel = d.tipLength && DRAG.tipLen <= 0 ? 0.022 : 0;
+  dragDirection(az, L, bevel);
+
+  if (d.poseGrip && d.tipLength) {
+    d.poseGrip(_dragDir, 1);
+    d.hand.updateWorldMatrix(true, false);
+    _dragHandPos.copy(d.obj.userData.weapon.target).applyMatrix4(d.hand.matrixWorld);
+    if (DRAG.ground) dragDirection(az, L, bevel);
   }
 
   // 进入拖刀的第一帧：用最短弧定一次「刀身滚转」，并把它锁下来。
@@ -2117,8 +2249,7 @@ function updateDragWeapon() {
 
   // 世界朝向 → 手骨局部朝向
   d.hand.getWorldQuaternion(_dragHandQuat);
-  _dragLocalQuat.copy(_dragHandQuat).invert().multiply(_dragQuat);
-  d.obj.quaternion.copy(_dragLocalQuat);
+  d.obj.quaternion.copy(_dragHandQuat).invert().multiply(_dragQuat);
 
   // 换了朝向后，握把会绕武器原点画弧、离开掌心 ——
   // 用 realign() 重新量一次「手柄末端那一圈」的几何中心，把它重新钉回掌心。
@@ -2135,7 +2266,6 @@ function updateDragWeapon() {
 // ── 渲染 ──────────────────────────────────────────────────────
 let lastPoseLogicFrame = 0;
 function render(dtReal) {
-  updateStage(performance.now() / 1000, camera);
   updateStage(performance.now() / 1000, camera);
   // 美术模型动画（灰盒可不接）
   const animDt = CFG.paused ? 0 : dtReal;   // 暂停时冻结动画，方便逐帧检查
@@ -2154,31 +2284,33 @@ function render(dtReal) {
     lastPoseLogicFrame = logicFrame;
     const bossAnimDt = hitstopFrames > 0 ? 0 : animDt * CFG.timeScale;
     const kick = boss.move?.grab ? grabBossAnimation(boss) : undefined;
-    boss.binder?.update(boss, boss.move?.grab ? poseDt : bossAnimDt, kick);
+    if (bossIntro) bossIntro.pose(bossAnimDt);
+    else boss.binder?.update(boss, boss.move?.grab ? poseDt : bossAnimDt, kick);
   }
 
   // 走路拖刀：世界空间定位，所以不会被走路动画带着上下颠
-  updateDragWeapon();
+  updateDragWeapon(bossIntro);
   scratch.update(CFG.paused ? 0 : dtReal * CFG.timeScale);
 
-  // 判定可视化
+  // 判定可视化和角色一起等资源就绪。
+  const showHitbox = combatReady && !bossIntro && CFG.showHitbox;
   const pv = activeHitbox(player);
   placeViz(player.hitViz, player.pos, player.yaw,
     player.move ? player.move.hitbox.offset * player.scale : 0,
     pv ? pv.radius : 0,
-    pv ? pv.yMin : 0, pv ? pv.yMax : 1, CFG.showHitbox && !!pv);
+    pv ? pv.yMin : 0, pv ? pv.yMax : 1, showHitbox && !!pv);
 
   const bv = activeHitbox(boss);
   placeViz(boss.hitViz, boss.pos, boss.yaw,
     boss.move ? boss.move.hitbox.offset * boss.scale : 0,
     bv ? bv.radius : 0,
-    bv ? bv.yMin : 0, bv ? bv.yMax : 1, CFG.showHitbox && !!bv);
+    bv ? bv.yMin : 0, bv ? bv.yMax : 1, showHitbox && !!bv);
 
   // 受击框（受击判定区，非遮挡）
   placeViz(player.hurtViz, player.pos, 0, 0,
-    player.hurt.radius * player.scale, 0, player.hurt.height * player.scale, CFG.showHitbox);
+    player.hurt.radius * player.scale, 0, player.hurt.height * player.scale, showHitbox && player.state !== 'dead');
   placeViz(boss.hurtViz, boss.pos, 0, 0,
-    boss.hurt.radius * boss.scale, 0, boss.hurt.height * boss.scale, CFG.showHitbox);
+    boss.hurt.radius * boss.scale, 0, boss.hurt.height * boss.scale, showHitbox && boss.state !== 'dead');
 
   // 格挡 / 弹反窗口的可视化
   updateGuardViz(player);
@@ -2196,7 +2328,7 @@ function render(dtReal) {
 
   // ── 真实剑轨：按「刃根 → 刃尖」逐帧采样，扇形由剑自己扫出来 ──
   feedBladeTrail('player', player, dtVfx);
-  feedBladeTrail('boss', boss, dtVfx);
+  feedBladeTrail('boss', boss, dtVfx, bossIntro ? false : undefined);
 
   const _q = gpuTimer ? gpuTimer.begin() : null;
   composer.render();
@@ -2251,7 +2383,11 @@ function loop(now) {
   const dtReal = THREE.MathUtils.clamp((now - lastTime) / 1000, 0, 0.1);
   lastTime = now;
 
-  if (combatReady && !CFG.paused) {
+  if (bossIntro) {
+    if (!CFG.paused) bossIntro.advance(dtReal * CFG.timeScale);
+    bossIntro.frameCamera(camera, settings.state().fov);
+    if (bossIntro.finished) finishBossIntro();
+  } else if (combatReady && !CFG.paused) {
     acc += dtReal * CFG.timeScale;
     let guard = 0;
     while (acc >= STEP && guard++ < 5) {
@@ -2275,15 +2411,44 @@ function loop(now) {
 //  8. HUD
 // ═══════════════════════════════════════════════════════════════
 const hud = document.getElementById('hud');
+const bossHud = document.getElementById('bossHud');
+const debugHud = document.getElementById('combatDebug');
+const hudFps = document.getElementById('hudFps');
+const hudSpeed = document.getElementById('hudSpeed');
+const hudHealth = document.getElementById('hudHealth');
+const hudStatus = document.getElementById('hudStatus');
+const hudPhase = document.getElementById('hudPhase');
+const playerLife = document.getElementById('playerLife');
+const playerHud = playerLife.closest('.player-hud');
+const playerPoise = document.getElementById('playerPoise');
+const bossLife = document.getElementById('bossLife');
+const bossPoise = document.getElementById('bossPoise');
 const bannerEl = document.getElementById('banner');
+const bannerText = document.getElementById('bannerText');
+const bannerHint = document.getElementById('bannerHint');
 let bannerTimer = null;
 
-function banner(text, ms = 1200, isDead = false) {
-  bannerEl.textContent = text;
-  bannerEl.classList.toggle('dead', isDead);
+function banner(text, ms = 1200, kind = 'notice') {
+  bannerText.textContent = text;
+  bannerEl.dataset.kind = kind;
+  bannerHint.hidden = kind !== 'defeat' && kind !== 'victory';
   bannerEl.classList.add('show');
   clearTimeout(bannerTimer);
   bannerTimer = setTimeout(() => bannerEl.classList.remove('show'), ms);
+}
+
+function hudText(element, text) {
+  if (element.textContent !== text) element.textContent = text;
+}
+
+function hudMeter(element, value, max) {
+  const ratio = max > 0 ? THREE.MathUtils.clamp(value / max, 0, 1) : 0;
+  const fill = ratio.toFixed(4);
+  if (element.style.getPropertyValue('--fill') !== fill) element.style.setProperty('--fill', fill);
+  const current = String(Math.round(ratio * max));
+  const total = String(Math.round(max));
+  if (element.getAttribute('aria-valuenow') !== current) element.setAttribute('aria-valuenow', current);
+  if (element.getAttribute('aria-valuemax') !== total) element.setAttribute('aria-valuemax', total);
 }
 
 function bar(cur, max, width = 10) {
@@ -2333,28 +2498,41 @@ function guardBar(a) {
 
 function updateHUD() {
   if (grabTestMode) updateGrabTestStatus();
+  hudMeter(playerLife, player.hp, player.maxHp);
+  hudMeter(playerPoise, player.poise, player.maxPoise);
+  hudMeter(bossLife, boss.hp, boss.maxHp);
+  hudMeter(bossPoise, boss.poise, boss.maxPoise);
+  playerHud.classList.toggle('is-low', player.hp < player.maxHp * 0.25);
+  hudText(hudHealth, `${Math.round(player.hp)} / ${Math.round(player.maxHp)}`);
+  const status = [player.lockOn ? '锁定' : '', player.iframe > 0 ? '无敌' : ''].filter(Boolean).join(' · ');
+  hudStatus.hidden = !status;
+  hudText(hudStatus, status);
+  hudText(hudFps, __fps ? String(__fps) : '–');
+  const speed = CFG.paused ? '已暂停' : CFG.timeScale !== 1 ? `${CFG.timeScale}×` : '';
+  hudSpeed.hidden = !speed;
+  hudText(hudSpeed, speed);
+
+  const bloodMoon = AI.phase2 || AI.phase3;
+  const phase = bloodMoon ? 'blood' : 'normal';
+  if (bossHud.dataset.phase !== phase) bossHud.dataset.phase = phase;
+  hudText(hudPhase, boss.state === 'dead' ? '已击败' : AI.phase3 ? '血月 · 第三阶段' : bloodMoon ? '血月 · 第二阶段' : '第一阶段');
+
+  if (!hud.classList.contains('show-debug')) return;
   const dist = player.pos.distanceTo(boss.pos);
-  const pMove = player.state === 'light1' || player.state === 'light2' ||
-    player.state === 'heavy' || player.state === 'roll' ||
-    player.state === 'block';
-  hud.innerHTML =
-    `<span class="k">玩家</span>  HP <span class="p">${bar(player.hp, player.maxHp, 20)}</span> ${Math.round(player.hp)}
-      <span class="k">韧性</span> <span class="p">${bar(player.poise, player.maxPoise, 10)}</span>  <span class="k">无敌</span> ${player.iframe > 0 ? '<span class="warn">●' + player.iframe + '</span>' : '○'}
-      <span class="k">状态</span> <span class="p">${stateLabel(player).padEnd(24)}</span> <span class="k">锁定</span> ${player.lockOn ? '<span class="p">ON</span>' : 'off'}
-      ${player.state === 'block' ? guardBar(player) : (pMove ? frameBar(player) : '')}
-
-<span class="k">Boss</span>  HP <span class="b">${bar(boss.hp, boss.maxHp, 20)}</span> ${Math.round(boss.hp)}
-      <span class="k">韧性</span> <span class="b">${bar(boss.poise, boss.maxPoise, 10)}</span>  <span class="k">距离</span> ${dist.toFixed(1)}m
-      <span class="k">状态</span> <span class="b">${stateLabel(boss).padEnd(24)}</span> ${boss.hp < boss.maxHp * 0.55 ? '<span class="warn">二阶段</span>' : '<span class="k">一阶段</span>'}
-      ${frameBar(boss)}
-
-<span class="k">逻辑帧</span> ${logicFrame}   <span class="fps"><span class="k">FPS</span> <span class="p">${__fps}</span>   </span><span class="k">画质</span> ${(QUALITY[qualityName] ?? QUALITY.mid).label}   <span class="k">hitstop</span> ${hitstopFrames}   <span class="k">倍速</span> ${CFG.timeScale}x`;
+  debugHud.innerHTML =
+    `玩家 ${stateLabel(player)} · 韧性 ${Math.round(player.poise)}
+${player.state === 'block' ? guardBar(player) : frameBar(player)}
+首领 ${stateLabel(boss)} · 韧性 ${Math.round(boss.poise)} · ${dist.toFixed(1)} m
+${frameBar(boss)}
+逻辑帧 ${logicFrame} · ${(QUALITY[qualityName] ?? QUALITY.mid).label}画质 · 顿帧 ${hitstopFrames}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  9. 调参面板
 // ═══════════════════════════════════════════════════════════════
 const gui = new GUI({ title: grabTestMode ? '擒拿调试' : '帧数据调参（改完立即生效）' });
+gui.show(grabTestMode);
+hud.classList.toggle('show-debug', grabTestMode);
 const fPlayer = gui.addFolder('玩家');
 fPlayer.add(CFG, 'playerIframe', 6, 20, 1).name('翻滚无敌帧');
 fPlayer.add(CFG, 'rollTotal', 20, 50, 1).name('翻滚总帧');
@@ -2589,7 +2767,19 @@ function downloadJSON() {
 // ═══════════════════════════════════════════════════════════════
 // 10. 重开
 // ═══════════════════════════════════════════════════════════════
+function finishBossIntro() {
+  if (!bossIntro) return;
+  bossIntro.dispose();
+  bossIntro = null;
+  document.body.classList.remove('boss-intro');
+  camera.fov = settings.state().fov;
+  camera.updateProjectionMatrix();
+  clearInput();
+  acc = 0;
+}
+
 function resetFight() {
+  finishBossIntro();
   grabSequence = null;
   if (grabTestMode) {
     const playerZ = grabTest.location === '近墙' ? playerWallRadius() - 0.32 : 2.9;
@@ -2642,12 +2832,19 @@ let combatReady = false;
   // Boss 武器：巨剑（assets/greatsword.glb）。想换回镰刀用 ?bwp=assets/scythe.glb
   const bossWeaponUrl = !wantWeapon ? null : (q.get('bwp') === 'none' ? weaponUrl : (q.get('bwp') ?? 'assets/greatsword.glb'));
   const wantAnim = !graybox && q.get('anim') !== '0';
-  if (!pUrl && !bUrl) { combatReady = true; return; }
+  if (!pUrl && !bUrl) {
+    combatReady = true;
+    document.body.classList.remove('booting');
+    return;
+  }
+
+  const actors = [player, boss];
+  for (const actor of actors) actor.mesh.group.visible = false;
 
   try {
     const { bindModel, loadAnimationPack, loadClipPack, loadClipJSON, dampenArmSwing } = await import('./asset-adapter.js');
     banner('加载模型…', 1500);
-    await Promise.all([
+    const models = await Promise.allSettled([
       pUrl ? bindModel(player, pUrl, {
         renderer,
         targetHeight: Number(q.get('ph') ?? 1.95),
@@ -2695,6 +2892,8 @@ let combatReady = false;
         yawOffset: Number(q.get('by') ?? 0),
       }) : null,
     ].filter(Boolean));
+    const failedModel = models.find(result => result.status === 'rejected');
+    if (failedModel) throw failedModel.reason;
 
     // 把实际加载到的武器角度同步进调参面板（用 ?bwrot= 覆盖时也对得上）
     const wg0 = boss.binder && boss.binder.weaponGroup;
@@ -2713,8 +2912,7 @@ let combatReady = false;
     // 追加类魂动作包（13 条 Mixamo 动捕，骨骼名同源，不需要 retarget）
     if (wantAnim) {
       banner('加载动作包…', 1200);
-      const actors = [player, boss].filter((a) => a.binder);
-      const counts = await Promise.all(actors.map((a) => loadAnimationPack(a.binder)));
+      const counts = await Promise.all(actors.filter(actor => actor.binder).map(actor => loadAnimationPack(actor.binder)));
       const grabClips = [
         [boss.binder, 'grabKick', 'assets/anims/GrabSideKick.json'],
         [player.binder, 'grabGetUp', 'assets/anims/GrabGetUp.json'],
@@ -2819,14 +3017,25 @@ let combatReady = false;
       console.log('[boss-arm] 缩短手臂骨骼:', n, 'factor:', armLen);
     }
 
+    if (boss.binder && bUrl === 'assets/boss_model_v2.glb') tintBossFace(boss.binder.root);
     setupDragWeapon();
     banner('模型就位', 1200);
+    if (!grabTestMode && boss.weapon) {
+      snapCamera();
+      bossIntro = createBossIntro(scene, boss, camera);
+      if (bossIntro) {
+        document.body.classList.add('boss-intro');
+        bannerEl.classList.remove('show');
+      }
+    }
   } catch (err) {
     console.warn('[asset] 模型加载失败，保持灰盒：', err);
     banner('模型加载失败，保持灰盒', 2200);
   } finally {
     clearInput();
+    for (const actor of actors) actor.mesh.group.visible = true;
     combatReady = true;
+    document.body.classList.remove('booting');
   }
 })();
 
@@ -2862,6 +3071,10 @@ const settings = createSettings({
   defaultKeys: DEFAULT_KEYS,
   onKeymapChange: rebuildKeymap,
   onOpen: clearInput,
+  onFrameDataVisibilityChange: grabTestMode ? undefined : visible => {
+    gui.show(visible);
+    hud.classList.toggle('show-debug', visible);
+  },
   onPreset: (name) => { qualityName = name; },
 });
 window.__settingsApi = settings;

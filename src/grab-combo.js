@@ -33,6 +33,11 @@ export function grabGetUpProgress(sequence) {
   return smooth(sequence.age, end - turnFrames, end);
 }
 
+function grabDeathClip(player) {
+  const binder = player.binder;
+  if (player.hp <= 0 && binder) return binder.clips.get(binder.clipMap.dead);
+}
+
 function getUpClipProgress(age) {
   return THREE.MathUtils.clamp((age - GET_UP_PLAY) / (GET_UP.play - 1), 0, 1);
 }
@@ -51,6 +56,11 @@ export function grabPlayerAnimation(player, sequence, logicFrame) {
       const duration = player.binder.clips.get(player.binder.clipMap.grabGetUp).duration;
       const progress = getUpClipProgress(age);
       return { key: 'grabGetUp', sampleTime: duration * progress, fade: GET_UP.blend / 60 };
+    }
+    const death = grabDeathClip(player);
+    if (death && age >= GET_UP.start) {
+      // 撞墙已完成倒地，直接过渡到死亡动画的最终姿势。
+      return { key: 'dead', sampleTime: death.duration, fade: GET_UP.blend / 60 };
     }
     if (!getUp && player.hp > 0 && grabGetUpProgress(sequence) > 0) return { key: 'idle' };
   }
@@ -151,7 +161,54 @@ function aimAt(joint, child, target, weight) {
   }
 }
 
-function poseLimb(limb, target, bend, weight) {
+export function orientJoint(joint, worldRotation, weight) {
+  if (weight <= 0) return;
+  joint.getWorldQuaternion(orientation);
+  delta.copy(orientation).invert().premultiply(worldRotation);
+  worldRotate(joint, delta, weight);
+}
+
+export function setJointLocalRotation(joint, rotation) {
+  if (!adjusted.has(joint)) adjusted.set(joint, joint.quaternion.clone());
+  joint.quaternion.copy(rotation);
+}
+
+// Align the index side of the fist with the guard, and the knuckles with the
+// forearm. Resolve axial roll at the forearm before bending the wrist.
+export function swordGripPose(hand) {
+  const finger = name => hand.children.find(n => n.name.toLowerCase().endsWith('hand' + name + '1'));
+  const index = finger('index'), pinky = finger('pinky'), middle = finger('middle');
+  if (!index || !pinky || !middle || !hand.parent?.isBone) return null;
+  const thumb = index.position.clone().sub(pinky.position).normalize();
+  const along = middle.position.clone().projectOnPlane(thumb).normalize();
+  const cross = new THREE.Vector3(), basis = new THREE.Matrix4();
+  const local = new THREE.Quaternion().setFromRotationMatrix(
+    basis.makeBasis(thumb, along, cross.crossVectors(thumb, along))
+  ).invert();
+  const fore = hand.parent;
+  const axis = new THREE.Vector3(), fingers = new THREE.Vector3(), old = new THREE.Vector3();
+  const desired = new THREE.Quaternion(), twist = new THREE.Quaternion(), q = new THREE.Quaternion();
+  let previousRoll = 0;
+  return (towardGuard, weight) => {
+    if (weight <= 0) return;
+    hand.getWorldPosition(axis).sub(fore.getWorldPosition(old)).normalize();
+    fingers.copy(axis).projectOnPlane(towardGuard);
+    if (fingers.lengthSq() < 1e-5) return;
+    fingers.normalize();
+    desired.setFromRotationMatrix(basis.makeBasis(towardGuard, fingers,
+      cross.crossVectors(towardGuard, fingers))).multiply(local);
+    old.copy(thumb).applyQuaternion(hand.getWorldQuaternion(q)).projectOnPlane(axis);
+    fingers.copy(towardGuard).projectOnPlane(axis);
+    const raw = Math.atan2(axis.dot(cross.crossVectors(old, fingers)), old.dot(fingers));
+    const delta = THREE.MathUtils.euclideanModulo(raw - previousRoll + Math.PI, 2 * Math.PI) - Math.PI;
+    previousRoll = THREE.MathUtils.clamp(previousRoll + delta, -Math.PI, Math.PI);
+    twist.setFromAxisAngle(axis, THREE.MathUtils.clamp(previousRoll, -1.3, 1.3));
+    orientJoint(fore, fore.getWorldQuaternion(q).premultiply(twist), weight);
+    orientJoint(hand, desired, weight);
+  };
+}
+
+export function poseLimb(limb, target, bend, weight) {
   const [upper, lower, tip] = limb;
   if (!upper || !lower || !tip || weight <= 0) return;
   const start = upper.getWorldPosition(new THREE.Vector3());
@@ -324,6 +381,7 @@ export function poseGrabVictim(player, sequence, grabHand) {
   let lower = 0;
   let centerWeight = 1;
   let groundWeight = 0;
+  let groundedAnimation = false;
   if (sequence.phase === 'held') {
     tilt = 0.18 * smooth(sequence.age, GRAB_TIMING.pull, GRAB_TIMING.lift);
   } else if (sequence.phase === 'toss') {
@@ -332,15 +390,20 @@ export function poseGrabVictim(player, sequence, grabHand) {
     tilt = flightTilt(sequence.age);
   } else {
     const { age, getUp } = sequence;
+    const death = grabDeathClip(player);
+    groundedAnimation = getUp || !!death;
     const impact = smooth(age, 0, getUp ? 11 : 9);
-    const playingGetUp = getUp && player.binder.currentName === player.binder.clipMap.grabGetUp;
-    const blend = playingGetUp ? player.binder.current.getEffectiveWeight() : 0;
+    const key = getUp ? 'grabGetUp' : 'dead';
+    const binder = player.binder;
+    const playing = groundedAnimation && binder.currentName === binder.clipMap[key];
+    const blend = playing ? binder.current.getEffectiveWeight() : 0;
     const animated = age >= GET_UP_IDLE ? 1 : blend;
-    const fall = getUp ? 1 - animated : 1 - grabGetUpProgress(sequence);
-    const landingTilt = getUp ? -1.60 : -1.25;
+    const fall = groundedAnimation ? 1 - animated : 1 - grabGetUpProgress(sequence);
+    const landingTilt = groundedAnimation ? -1.60 : -1.25;
     tilt = THREE.MathUtils.lerp(flightTilt(sequence.flightFrames ?? 0), landingTilt, impact) * fall;
     lower = 0.72 * impact * fall;
-    groundWeight = getUp ? impact * (1 - smooth(age, GET_UP_PLAY, GET_UP_PLAY + 6)) : 0;
+    const settleFrame = getUp ? GET_UP_PLAY : GET_UP_GROUNDED;
+    groundWeight = groundedAnimation ? impact * (1 - smooth(age, settleFrame, settleFrame + 6)) : 0;
     centerWeight = getUp ? 1 - smooth(age, GET_UP_IDLE, grabRecoveryFrames(sequence) - 1) : fall;
   }
   // Keep the rotation pivot around the waist while the combat position stays at the feet.
@@ -374,5 +437,5 @@ export function poseGrabVictim(player, sequence, grabHand) {
     rig.chest.getWorldPosition(point);
     group.position.addScaledVector(contact.sub(point), grasp);
   }
-  if (sequence.phase === 'wall' && !sequence.getUp) group.position.y = Math.max(0, group.position.y);
+  if (sequence.phase === 'wall' && !groundedAnimation) group.position.y = Math.max(0, group.position.y);
 }

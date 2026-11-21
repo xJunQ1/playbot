@@ -160,9 +160,10 @@ export function poseGuardbreak(frame) {
 }
 
 /** 死亡：向后倒地，武器脱手 */
+export const DEATH_POSE_FRAMES = 34;
 export function poseDead(frame) {
   const p = basePose();
-  const t = easeOut(clamp01(frame / 34));
+  const t = easeOut(clamp01(frame / DEATH_POSE_FRAMES));
   p.__body = [-t * Math.PI * 0.52, 0, 0];
   p.__bodyY = lerp(0.0, 0.30, t);
   p.spine = [0.05 - t * 0.30, 0, 0];
@@ -321,7 +322,8 @@ export function poseFor(actor, clock, getUp = 0) {
     case 'launched':
       return poseHit(2, 14);
     case 'wallstun':
-      return mixPose(poseHit(2, 14), poseIdle(clock), getUp);
+      return mixPose(poseHit(2, 14), actor.hp <= 0 ? poseDead(DEATH_POSE_FRAMES) : poseIdle(clock), getUp);
+    case 'parried':
     case 'hitstun':
       return poseHit(actor.frame, actor.stunTimer || 14);
     case 'guardbreak':

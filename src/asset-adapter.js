@@ -67,43 +67,61 @@ export const DEFAULT_CLIP_MAP = {
   b_charge: 'Standing_Dodge_Forward',
 };
 
-// Cache support points on the soles before animation starts. Keep the extreme
-// vertices at several slopes so heel strikes and toes can both carry weight.
-function collectSoleVertices(root) {
-  const patches = [];
+// Sample support in several directions in the bind pose. A fallen character
+// can rest on the torso, head, or hands as well as on the soles.
+const soleDirections = [];
+const bodyDirections = [];
+for (let x = -2; x <= 2; x++) {
+  for (let z = -2; z <= 2; z++) soleDirections.push([x, -1, z]);
+}
+for (let x = -1; x <= 1; x++) {
+  for (let y = -1; y <= 1; y++) {
+    for (let z = -1; z <= 1; z++) {
+      if (x || y || z) bodyDirections.push([x, y, z]);
+    }
+  }
+}
+
+function collectGroundVertices(root, includeBody) {
+  const soles = [], body = [];
   const point = new THREE.Vector3();
   root.updateWorldMatrix(true, false);
   root.updateMatrixWorld(true);
+  const collect = (hull, directions, index) => {
+    for (let i = 0; i < directions.length; i++) {
+      const [x, y, z] = directions[i];
+      const score = x * point.x + y * point.y + z * point.z;
+      if (!hull[i] || score > hull[i].score) hull[i] = { score, index };
+    }
+  };
   root.traverse(mesh => {
     if (!mesh.isSkinnedMesh) return;
     const { position, skinIndex, skinWeight } = mesh.geometry.attributes;
-    const byBone = new Map();
+    const soleHulls = [];
+    const bodyHulls = [];
     mesh.skeleton.bones.forEach((bone, i) => {
-      if (/(?:foot|toebase)$/i.test(bone.name)) byBone.set(i, new Map());
+      if (/(?:foot|toebase)$/i.test(bone.name)) soleHulls[i] = [];
+      if (includeBody) bodyHulls[i] = [];
     });
-    if (!byBone.size) return;
     const stride = Math.max(1, Math.floor(position.count / 60000));
     for (let i = 0; i < position.count; i += stride) {
       let joint = 0;
       for (let j = 1; j < 4; j++) {
         if (skinWeight.getComponent(i, j) > skinWeight.getComponent(i, joint)) joint = j;
       }
-      const hull = byBone.get(skinIndex.getComponent(i, joint));
-      if (!hull) continue;
+      const bone = skinIndex.getComponent(i, joint);
+      const sole = soleHulls[bone];
+      if (!includeBody && !sole) continue;
       mesh.getVertexPosition(i, point).applyMatrix4(mesh.matrixWorld);
-      for (let x = -2; x <= 2; x++) {
-        for (let z = -2; z <= 2; z++) {
-          const key = 5 * x + z;
-          const score = point.y + x * point.x + z * point.z;
-          if (!hull.has(key) || score < hull.get(key).score) hull.set(key, { score, i });
-        }
-      }
+      if (includeBody) collect(bodyHulls[bone], bodyDirections, i);
+      if (sole) collect(sole, soleDirections, i);
     }
-    const indices = new Set();
-    for (const hull of byBone.values()) for (const { i } of hull.values()) indices.add(i);
-    if (indices.size) patches.push({ mesh, indices });
+    const soleIndices = new Set(soleHulls.flat().map(sample => sample.index));
+    const bodyIndices = new Set(bodyHulls.flat().map(sample => sample.index));
+    if (soleIndices.size) soles.push({ mesh, indices: soleIndices });
+    if (bodyIndices.size) body.push({ mesh, indices: bodyIndices });
   });
-  return patches;
+  return { soles, body };
 }
 
 export class ModelBinder {
@@ -126,7 +144,15 @@ export class ModelBinder {
     this.currentName = '';
 
     this.root.traverse((o) => {
-      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
+      if (!o.isMesh) return;
+      o.castShadow = true;
+      o.receiveShadow = true;
+      o.frustumCulled = false;
+      if (!o.isSkinnedMesh) return;
+
+      // 骨骼矩阵包含世界位移，mediump 会让远离世界原点的蒙皮顶点错位。
+      const materials = Array.isArray(o.material) ? o.material : [o.material];
+      for (const material of materials) material.precision = 'highp';
     });
   }
 
@@ -277,7 +303,7 @@ export class ModelBinder {
   }
 
   // 每渲染帧更新姿态，Boss 出招时用逻辑帧定位动画。
-  update(actor, dt, { key = this._clipKey(actor), sampleTime, fade } = {}) {
+  update(actor, dt, { key = this._clipKey(actor), sampleTime, fade, groundFeet = false } = {}) {
     const targetName = this.clipMap[key];
 
     if (targetName && targetName !== this.currentName) {
@@ -290,8 +316,8 @@ export class ModelBinder {
         // 攻击 / 翻滚：单次播放，不循环
         // 攻击/翻滚：单次播放，不循环（heavy2 / heavy3 / light4 也必须算进来，
         // 否则播到片段末尾会绕回第 0 帧，表现为「结尾重复一帧」）
-        const onceState = sampleTime !== undefined || actor.state === 'roll' || (actor.state === 'attack' && !actor.move?.grab) || actor.state === 'backstep' || actor.state === 'recover'
-          || /^light\d*$/.test(actor.state) || /^heavy\d*$/.test(actor.state);
+        const onceState = sampleTime !== undefined || actor.state === 'dead' || actor.state === 'roll' || (actor.state === 'attack' && !actor.move?.grab) || actor.state === 'backstep' || actor.state === 'recover'
+          || actor.state === 'parried' || /^light\d*$/.test(actor.state) || /^heavy\d*$/.test(actor.state);
         if (onceState) {
           next.setLoop(THREE.LoopOnce, 1);
           next.clampWhenFinished = true;
@@ -330,31 +356,47 @@ export class ModelBinder {
       }
     }
 
-    const manualFrames = actor.backstep?.frames
+    const manualFrames = actor.state === 'parried' ? actor.stunTimer : actor.backstep?.frames
       ?? (actor.isBoss && actor.move && !actor.move.grab ? totalFrames(actor.move) : actor.recoveryFrames);
     if (sampleTime !== undefined && this.currentName === targetName) {
       this.current.paused = true;
       this.current.time = Math.min(this.current.getClip().duration, sampleTime);
     } else if (manualFrames && this.currentName === targetName) {
-      // 多段判定与后撤动作使用逻辑帧，慢放及命中停顿时不会提前播完。
+      // 以逻辑帧采样出招、后撤和弹反硬直，慢放或命中停顿时动作跟随判定。
       this.current.paused = true;
       this.current.time = this.current.getClip().duration * actor.frame / manualFrames;
     }
     this.mixer.update(dt);
-    if (this.solePatches?.length) this.groundPose(actor, dt);
+    if (this.solePatches) this.groundPose(actor, dt, groundFeet);
     if (this.gripEnabled !== false) applySwordGrip(this.root, 'Right');   // 握剑手：右手五指卷曲
   }
 
-  groundPose(actor, dt) {
-    if (actor.state !== 'attack' && actor.state !== 'backstep' && actor.state !== 'recover') {
+  groundPose(actor, dt, groundFeet = false) {
+    const fallen = actor.isBoss && actor.state === 'dead';
+    if (this.groundedDeath && !fallen) this.root.position.y = this.restRootY;
+    this.groundedDeath = fallen;
+    const lightCombo = !actor.isBoss && /^p_light[1-4]$/.test(actor.moveId ?? '');
+    // Keep the support foot grounded while the final slash blends back to idle.
+    const lightRecovery = actor.state === 'idle' && this.lightGroundAction?.getEffectiveWeight() > 0;
+    if (lightCombo) {
+      this.lightGroundAction = this.current;
+    } else if (!lightRecovery && this.lightGroundAction) {
+      if (actor.state === 'idle') this.root.position.y = this.restRootY;
+      this.lightGroundAction = null;
+    }
+    const bossGroundMove = actor.isBoss
+      && (actor.state === 'attack' || actor.state === 'backstep' || actor.state === 'recover');
+    if (!fallen && !groundFeet && !bossGroundMove && !lightCombo && !lightRecovery) {
       // Ease the visual offset out through the blend back into locomotion.
       this.root.position.y = THREE.MathUtils.damp(this.root.position.y, this.restRootY, 24, dt);
       return;
     }
+    const patches = fallen ? this.bodyPatches : this.solePatches;
+    if (!patches?.length) return;
     this.root.updateWorldMatrix(true, false);
     this.root.updateMatrixWorld(true);
     let lowest = Infinity;
-    for (const { mesh, indices } of this.solePatches) {
+    for (const { mesh, indices } of patches) {
       for (const index of indices) {
         mesh.getVertexPosition(index, this.solePoint).applyMatrix4(mesh.matrixWorld);
         lowest = Math.min(lowest, this.solePoint.y);
@@ -371,7 +413,7 @@ export class ModelBinder {
     // 不能用 `state === 'light1' || 'light2' || 'heavy'` 那种写法 —— || 链恒为真，
     // 会把 'light1' 当成键去查 p_light1 的动画，永远查不到。
     if (actor.move?.grab) return 'idle';
-    if (actor.state === 'grabbed' || actor.state === 'launched' || actor.state === 'wallstun') return 'hitstun';
+    if (actor.state === 'parried' || actor.state === 'grabbed' || actor.state === 'launched' || actor.state === 'wallstun') return 'hitstun';
     if (actor.moveId) return actor.moveId;
     // 格挡时走动要播行走动画，否则原地循环 + 代码位移 = 滑行
     if (actor.state === 'block' && actor.moving) return 'blockmove';
@@ -503,6 +545,15 @@ function lookupSourceByAlias(targetName, sByBase) {
   return null;
 }
 
+// Convert displacement between spaces without applying either space's origin.
+function displacementBasis(from, to) {
+  from.updateWorldMatrix(true, false);
+  to.updateWorldMatrix(true, false);
+  return new THREE.Matrix3().setFromMatrix4(
+    new THREE.Matrix4().copy(to.matrixWorld).invert().multiply(from.matrixWorld)
+  );
+}
+
 export function retargetClip(targetRoot, sourceRoot, clip, opts = {}) {
   // ── 去外展（把 Mixamo 动画自带的外八站姿收窄）─────────────────────────────
   // 大腿绕「骨骼本地 Z 轴」内收；脚掌反向补一半，避免内八。
@@ -568,17 +619,16 @@ export function retargetClip(targetRoot, sourceRoot, clip, opts = {}) {
     if (!t || !s) continue;
 
     if (prop === 'position') {
-      // 只保留 Hips 的位移。翻滚时身体下潜靠的就是它 —— 全删掉只剩骨骼旋转，
-      // 头顶永远降不下去，看起来像「按了闪避但人没滚」。
-      // X/Z 锁死在 rest，避免和 frame-data.js 的 motion 曲线叠成双倍位移。
+      // Keep the hip's vertical motion in model space. The Boss armature's local Y points sideways.
       if (!/^hips?$/i.test(stripRigName(bone))) continue;
-      const ps = s.position;
-      const pt = t.position;
+      const sourceBasis = displacementBasis(s.parent ?? sourceRoot, sourceRoot);
+      const targetUp = new THREE.Vector3(0, 1, 0)
+        .applyMatrix3(displacementBasis(targetRoot, t.parent ?? targetRoot));
+      const offset = new THREE.Vector3();
       const vals = new Float32Array(track.values.length);
       for (let k = 0; k < track.values.length; k += 3) {
-        vals[k]     = pt.x;
-        vals[k + 1] = pt.y + (track.values[k + 1] - ps.y);
-        vals[k + 2] = pt.z;
+        const height = offset.fromArray(track.values, k).sub(s.position).applyMatrix3(sourceBasis).y;
+        offset.copy(t.position).addScaledVector(targetUp, height).toArray(vals, k);
       }
       out.push(new THREE.VectorKeyframeTrack(`${t.name}.position`, track.times, vals));
       continue;
@@ -821,11 +871,10 @@ export function swapLowerTracks(target, source) {
   return new THREE.AnimationClip(target.name, target.duration, out);
 }
 /**
- * 握剑手：把右手五指卷起来。项目里手指骨骼没有被动画驱动，
- * 所以每帧直接设成本地 Z 轴卷曲即可（实测 z 轴 70° 时指尖到掌心最近）。
+ * 握剑手：动画片段未提供握柄动作，按骨架的指节弯曲轴设置握姿。
  */
 const GRIP_FINGERS = [
-  // 指节 1 / 2 / 3 的卷曲角度（绕手骨本地 Z 轴）
+  // 指节 1 / 2 / 3 的卷曲角度。
   ['Index', 72, 88, 70],
   ['Middle', 76, 92, 72],
   ['Ring', 78, 92, 72],
@@ -848,13 +897,22 @@ export function shiftClipHipsY(clip, dy) {
   return new THREE.AnimationClip(clip.name, clip.duration, out);
 }
 export function applySwordGrip(root, side = 'Right') {
-  const z = new THREE.Vector3(0, 0, 1);
+  const mixamoHand = root.getObjectByName(`mixamorig${side}Hand`);
+  const handPrefix = mixamoHand ? `mixamorig${side}Hand` : `${side}Hand`;
+  if (!mixamoHand && !root.getObjectByName(handPrefix)) return;
+  // The Boss's FBX rig uses X as the finger hinge. Preserve the existing grip
+  // for Mixamo rigs, whose fingers were calibrated around Z.
+  const axis = mixamoHand ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(side === 'Right' ? 1 : -1, 0, 0);
+  const thumbAcross = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1),
+    THREE.MathUtils.degToRad(side === 'Right' ? 53 : -53));
   for (const [name, a1, a2, a3] of GRIP_FINGERS) {
     for (let seg = 1; seg <= 3; seg++) {
-      const bone = root.getObjectByName(`mixamorig${side}Hand${name}${seg}`);
+      const bone = root.getObjectByName(`${handPrefix}${name}${seg}`);
       if (!bone) continue;
-      const deg = seg === 1 ? a1 : seg === 2 ? a2 : a3;
-      bone.quaternion.setFromAxisAngle(z, THREE.MathUtils.degToRad(deg));
+      let deg = seg === 1 ? a1 : seg === 2 ? a2 : a3;
+      if (!mixamoHand && seg === 1) deg = name === 'Thumb' ? 27 : deg + 8;
+      bone.quaternion.setFromAxisAngle(axis, THREE.MathUtils.degToRad(deg));
+      if (!mixamoHand && name === 'Thumb' && seg === 1) bone.quaternion.premultiply(thumbAcross);
     }
   }
 }
@@ -1066,8 +1124,7 @@ export async function loadClipJSON(binder, url, opts = {}) {
   const pelvis = height && resolveTargetBone(byBone, height.bone);
   if (pelvis?.parent) {
     // 高度以模型空间为单位。Boss 的骨盆父骨骼有缩放和轴向转换，玩家的没有。
-    const up = pelvis.parent.worldToLocal(binder.root.localToWorld(new THREE.Vector3(0, 1, 0)))
-      .sub(pelvis.parent.worldToLocal(binder.root.getWorldPosition(new THREE.Vector3())));
+    const up = new THREE.Vector3(0, 1, 0).applyMatrix3(displacementBasis(binder.root, pelvis.parent));
     const values = new Float32Array(height.v.length * 3);
     const position = new THREE.Vector3();
     for (let i = 0; i < height.v.length; i++) {
@@ -1154,12 +1211,11 @@ export async function loadAnimationPack(binder, pack = SOULS_PACK, base = '') {
         const L2 = Math.round(1.34 * 60);   // 80
         const L3 = Math.round(1.94 * 60);   // 116
         const L4 = Math.round(2.60 * 60);   // 156
-        const fullL4 = clip;
-        // 源动作髋高整体下沉，四段各自补一点让脚贴地（实测校准值）
-        binder.clips.set('LightCombo4_1', shiftClipHipsY(sliceClip(fullL4, 0,  L1, 60), -0.10));
-        binder.clips.set('LightCombo4_2', shiftClipHipsY(sliceClip(fullL4, L1, L2, 60),  0.05));
-        binder.clips.set('LightCombo4_3', shiftClipHipsY(sliceClip(fullL4, L2, L3, 60),  0.55));
-        binder.clips.set('LightCombo4_4', shiftClipHipsY(sliceClip(fullL4, L3, L4, 60),  1.23));
+        // Foot contact is resolved after the mixer blends the four clips.
+        binder.clips.set('LightCombo4_1', sliceClip(clip, 0, L1, 60));
+        binder.clips.set('LightCombo4_2', sliceClip(clip, L1, L2, 60));
+        binder.clips.set('LightCombo4_3', sliceClip(clip, L2, L3, 60));
+        binder.clips.set('LightCombo4_4', sliceClip(clip, L3, L4, 60));
       }
 
       if (name === 'LightCombo') {
@@ -1510,11 +1566,11 @@ export async function bindModel(actor, url, opts = {}) {
   if (opts.targetHeight) binder.fitToHeight(opts.targetHeight);
   // FBX→GLB 的模型骨骼尺度可能和网格差很远，再按骨骼校一次（武器挂载之前）
   if (opts.boneFit) binder.fitToHeightBones(opts.targetHeight);
-  if (actor.isBoss) {
-    binder.restRootY = binder.root.position.y;
-    binder.solePoint = new THREE.Vector3();
-    binder.solePatches = collectSoleVertices(binder.root);
-  }
+  binder.restRootY = binder.root.position.y;
+  binder.solePoint = new THREE.Vector3();
+  const contacts = collectGroundVertices(binder.root, actor.isBoss);
+  binder.solePatches = contacts.soles;
+  binder.bodyPatches = contacts.body;
 
   // 武器是附加物：加载失败不能把整个 bindModel 拖挂 ——
   // 那样 Promise.all 会 reject，window.__dbg 都挂不上，整个 demo 停摆。

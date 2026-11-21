@@ -17,14 +17,15 @@ with sync_playwright() as p:
     page.on("console", lambda m: logs.append(f"[{m.type}] {m.text}"))
     page.on("pageerror", lambda e: logs.append(f"[pageerror] {e}"))
 
+    page.add_init_script("localStorage.setItem('souls-demo-settings', JSON.stringify({v: 5, showFrameData: true}));")
     page.goto(URL, wait_until="load")
-    page.wait_for_timeout(3500)
+    page.locator("#hud").wait_for(state="visible")
 
     # 1) initial frame
     page.screenshot(path=f"{OUT}/01-idle.png")
 
     # 2) light attack
-    page.keyboard.press("j")
+    page.mouse.click(640, 360, button="left")
     page.wait_for_timeout(250)
     page.screenshot(path=f"{OUT}/02-attack.png")
 
@@ -32,7 +33,7 @@ with sync_playwright() as p:
     page.keyboard.down("w")
     page.wait_for_timeout(1400)
     page.keyboard.up("w")
-    page.keyboard.press("k")
+    page.keyboard.press("f")
     page.wait_for_timeout(300)
     page.screenshot(path=f"{OUT}/03-heavy.png")
 
@@ -42,15 +43,14 @@ with sync_playwright() as p:
     page.screenshot(path=f"{OUT}/04-roll.png")
 
     # 5) lock on, wait for an active boss attack frame
-    page.mouse.click(640, 360, button="right")
+    page.mouse.click(640, 360, button="middle")
     page.wait_for_timeout(300)
     page.screenshot(path=f"{OUT}/05-locked.png")
 
     captured = False
     for _ in range(120):
         page.wait_for_timeout(60)
-        txt = page.inner_text("#hud")
-        if "attack:" in txt:
+        if page.evaluate("window.__dbg.boss.state === 'attack'"):
             page.screenshot(path=f"{OUT}/06-boss-attack.png")
             captured = True
             print("[captured boss attack frame]")
@@ -60,21 +60,21 @@ with sync_playwright() as p:
         print("[no attack frame captured]")
 
     # 6) guard: freeze the frame first, otherwise the screenshot itself burns the 8-frame window
-    page.keyboard.down("l")
+    page.mouse.down(button="right")
     page.wait_for_timeout(30)
     page.keyboard.press("F3")          # pause: freezes logic frame
     page.wait_for_timeout(120)
-    parry_hud = page.inner_text("#hud")
+    parry_hud = page.inner_text("#combatDebug")
     page.screenshot(path=f"{OUT}/07-guard-parry.png")
     page.keyboard.press("F3")
 
     page.wait_for_timeout(600)
     page.keyboard.press("F3")
     page.wait_for_timeout(120)
-    hold_hud = page.inner_text("#hud")
+    hold_hud = page.inner_text("#combatDebug")
     page.screenshot(path=f"{OUT}/08-guard-hold.png")
     page.keyboard.press("F3")
-    page.keyboard.up("l")
+    page.mouse.up(button="right")
     page.wait_for_timeout(150)
 
     print("=== PARRY WINDOW HUD ===")
@@ -87,18 +87,13 @@ with sync_playwright() as p:
                     clip={"x": 990, "y": 0, "width": 290, "height": 720})
 
     # 7) soak test: hold guard and eat boss hits, verify damage reduction
-    import re
-    def hp_of(t):
-        m = re.search(r"HP\s*[^\d]*?(\d+)", t)
-        return int(m.group(1)) if m else -1
-
     page.keyboard.press("r")
     page.wait_for_timeout(600)
-    page.keyboard.down("l")
-    soak0 = hp_of(page.inner_text("#hud"))
+    page.mouse.down(button="right")
+    soak0 = int(page.locator("#playerLife").get_attribute("aria-valuenow"))
     page.wait_for_timeout(9000)
-    soak1 = hp_of(page.inner_text("#hud"))
-    page.keyboard.up("l")
+    soak1 = int(page.locator("#playerLife").get_attribute("aria-valuenow"))
+    page.mouse.up(button="right")
     page.screenshot(path=f"{OUT}/09-guard-soak.png")
     print(f"=== GUARD SOAK: HP {soak0} -> {soak1} (delta {soak1 - soak0}) ===")
 

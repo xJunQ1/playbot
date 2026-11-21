@@ -14,6 +14,7 @@ const DEFAULTS = {
   fov: 60,
   sensitivity: 1,
   fps: true,
+  showFrameData: false,
   sharp: 0.35,
   ss: 1.5,
   aa: 'smaa',
@@ -28,7 +29,7 @@ const PRESETS = {
 };
 
 export function createSettings(ctx) {
-  const { renderer, composer, gtao, camera, scene, STAGE, CFG, gpuName, keymap, defaultKeys, onKeymapChange, onPreset, sharpen, syncSharpen, bloom, smaa, fxaa } = ctx;
+  const { renderer, composer, gtao, camera, scene, STAGE, CFG, gpuName, keymap, defaultKeys, onKeymapChange, onPreset, onFrameDataVisibilityChange, sharpen, syncSharpen, bloom, smaa, fxaa } = ctx;
 
   // 设置表结构版本：v2 = 超采样 1.5x；v3 = FOV 默认 35；v4 = 环境光遮蔽默认关。
   // 老存档（没有 v 字段）里这几个键会丢掉，让新版默认值生效，其它个人项（体积、键位等）保留。
@@ -115,6 +116,7 @@ export function createSettings(ctx) {
     const hud = document.getElementById('hud');
     if (hud) hud.classList.toggle('no-fps', !state.fps);
 
+    onFrameDataVisibilityChange?.(state.showFrameData === true);
     if (onPreset) onPreset(state.preset);
     syncUi();
     save();
@@ -140,7 +142,15 @@ export function createSettings(ctx) {
     $('setSensitivityVal').textContent = state.sensitivity.toFixed(1) + '×';
     const fps = $('setFps');
     if (fps) fps.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === '1') === state.fps));
+    $('setFrameData')?.querySelectorAll('button').forEach((button) => {
+      const selected = (button.dataset.v === '1') === (state.showFrameData === true);
+      button.classList.toggle('on', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
 
+    const sharpValue = state.sharp ?? DEFAULTS.sharp;
+    $('setSharp').value = sharpValue;
+    $('setSharpVal').textContent = Math.round(sharpValue * 100) + '%';
     const aaSel = $('setAA'); if (aaSel) aaSel.value = state.aa || 'fxaa';
     const fogEl = $('setFog');
     if (fogEl) { fogEl.value = state.fog ?? 0.42; const fv = $('setFogVal'); if (fv) fv.textContent = Math.round((state.fog ?? 0.42) * 100) + '%'; }
@@ -201,6 +211,13 @@ export function createSettings(ctx) {
   }
 
   function renderKeys() {
+    for (const key of document.querySelectorAll('#help [data-binding]')) {
+      const actions = key.dataset.binding.split(' ');
+      const labels = actions.map(action => (keymap[action] ?? []).map(code =>
+        keyName(code).replace('鼠标', '').replace(/^[LR]-Shift$/, 'Shift')
+      ).join(' / '));
+      key.textContent = labels.filter(Boolean).join(' ') || '未绑定';
+    }
     const box = document.getElementById('keyList');
     if (!box || !keymap) return;
     box.innerHTML = '';
@@ -320,16 +337,19 @@ export function createSettings(ctx) {
   }
   setupNative();
   let liveTimer = null;
+  let previousFocus = null;
   function setOpen(open) {
     const el = $('settings');
     if (!el || el.classList.contains('open') === open) return;
     el.classList.toggle('open', open);
     if (open) {
+      previousFocus = document.activeElement;
       ctx.onOpen();
       if (document.pointerLockElement) document.exitPointerLock();
       pausedBefore = CFG.paused;
       CFG.paused = true;
       apply();
+      el.querySelector('[role=tab][aria-selected=true]')?.focus({ preventScroll: true });
       // 面板打开期间每秒刷新 GPU / FPS / 刷新模式读数
       if (!liveTimer) liveTimer = setInterval(syncUi, 1000);
     } else {
@@ -337,17 +357,61 @@ export function createSettings(ctx) {
       window.__recordingKey = false;
       renderKeys();
       CFG.paused = pausedBefore;
+      const returnFocus = previousFocus === document.body ? $('gear') : previousFocus;
+      returnFocus?.focus({ preventScroll: true });
       if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     }
+  }
+
+  function bindTabs(el) {
+    const nav = el.querySelector('.settings-nav');
+    const tabs = [...nav.querySelectorAll('[role=tab]')];
+    const narrow = matchMedia('(max-width: 590px)');
+    const syncOrientation = () => nav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
+    narrow.addEventListener('change', syncOrientation);
+    syncOrientation();
+    function select(tab) {
+      for (const button of tabs) {
+        const selected = button === tab;
+        button.tabIndex = selected ? 0 : -1;
+        button.setAttribute('aria-selected', String(selected));
+        $(button.getAttribute('aria-controls')).hidden = !selected;
+      }
+      el.querySelector('.settings-content').scrollTop = 0;
+      tab.focus();
+    }
+    for (const tab of tabs) tab.addEventListener('click', () => select(tab));
+    nav.addEventListener('keydown', event => {
+      if (recording) return;
+      const active = tabs.indexOf(document.activeElement);
+      if (active < 0) return;
+      const direction = { ArrowUp: -1, ArrowLeft: -1, ArrowDown: 1, ArrowRight: 1 }[event.key];
+      if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+      event.preventDefault();
+      const index = direction ? (active + direction + tabs.length) % tabs.length
+        : event.key === 'Home' ? 0 : tabs.length - 1;
+      select(tabs[index]);
+    });
+    el.addEventListener('keydown', event => {
+      if (event.key !== 'Tab' || recording) return;
+      const items = [...el.querySelectorAll('button:not([disabled]):not([tabindex="-1"]), select, input, [role=tabpanel]')]
+        .filter(element => element.getClientRects().length > 0);
+      const end = event.shiftKey ? items[0] : items.at(-1);
+      if (event.target !== end) return;
+      event.preventDefault();
+      (event.shiftKey ? items.at(-1) : items[0]).focus();
+    });
   }
 
   function bind() {
     const el = $('settings');
     if (!el) return false;
+    bindTabs(el);
     const gear = $('gear');
     if (gear) gear.addEventListener('click', () => setOpen(!el.classList.contains('open')));
     const close = $('setClose');
     if (close) close.addEventListener('click', () => setOpen(false));
+    $('setDismiss')?.addEventListener('click', () => setOpen(false));
     const reset = $('setReset');
     if (reset) reset.addEventListener('click', () => {
       state = Object.assign({}, DEFAULTS);
@@ -381,8 +445,29 @@ export function createSettings(ctx) {
     document.querySelectorAll('#setShadow button').forEach((b) => b.addEventListener('click', () => { state.shadow = b.dataset.v === '1'; apply(); }));
     document.querySelectorAll('#setDecor button').forEach((b) => b.addEventListener('click', () => { state.decor = b.dataset.v === '1'; apply(); }));
     document.querySelectorAll('#setFps button').forEach((b) => b.addEventListener('click', () => { state.fps = b.dataset.v === '1'; apply(); }));
+    const frameData = $('setFrameData');
+    if (frameData && onFrameDataVisibilityChange) {
+      frameData.hidden = false;
+      frameData.querySelectorAll('button').forEach((button) => {
+        button.addEventListener('click', () => {
+          state.showFrameData = button.dataset.v === '1';
+          onFrameDataVisibilityChange(state.showFrameData);
+          syncUi();
+          save();
+        });
+      });
+    }
     const aaSel = $('setAA');
     if (aaSel) aaSel.addEventListener('change', (e) => { state.aa = e.target.value; apply(); });
+    $('setSharp').addEventListener('input', e => {
+      state.sharp = Number(e.target.value);
+      if (sharpen) {
+        sharpen.material.uniforms.strength.value = state.sharp;
+        syncSharpen?.();
+      }
+      syncUi();
+      save();
+    });
     const fogIn = $('setFog');
     if (fogIn) fogIn.addEventListener('input', (e) => { state.fog = parseFloat(e.target.value); apply(); });
     const bloomIn = $('setBloom');

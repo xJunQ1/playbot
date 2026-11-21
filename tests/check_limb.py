@@ -2,7 +2,7 @@
 """Limb-direction check: from the side, is the knee / elbow bending forward?"""
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://localhost:5173/?graybox=1"
 
 SIDE_CAM = """(which) => {
   const { camera, player, boss } = window.__dbg;
@@ -65,10 +65,10 @@ with sync_playwright() as pw:
     page.evaluate("() => window.__dbg.CFG.paused = false")
     page.keyboard.press("F3")
     page.wait_for_timeout(150)
-    page.keyboard.press("k")
+    page.keyboard.press("f")
     for _ in range(40):
         page.wait_for_timeout(30)
-        if "heavy" in page.inner_text("#hud"):
+        if page.evaluate("window.__dbg.player.state.startsWith('heavy')"):
             break
     page.keyboard.press("F3")
     page.wait_for_timeout(200)

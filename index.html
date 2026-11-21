@@ -1,210 +1,163 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-<title>Souls Graybox — 类魂战斗灰盒</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  html,body { width:100%; height:100%; overflow:hidden; background:#0b0c0e; }
-  canvas { display:block; }
-  #hud {
-    position:fixed; left:16px; top:14px; z-index:10;
-    font:12px/1.55 "Cascadia Mono","Consolas",monospace;
-    color:#cfd3d8; text-shadow:0 1px 3px #000; pointer-events:none;
-    white-space:pre;
-  }
-  #hud .k { color:#7d8794; }
-  #hud .p { color:#8fd3ff; }
-  #hud .b { color:#ff9f6a; }
-  #hud .warn { color:#ff5a5a; }
-  #hud .fb-s { color:#79838f; }
-  #hud .fb-a { color:#ff5a5a; }
-  #hud .fb-r { color:#59616c; }
-  #hud .dim { opacity:.24; }
-  #hud.no-fps .fps { display:none; }
-  #hud .cur { color:#ffffff; font-weight:700; }
-  #help {
-    position:fixed; left:16px; bottom:14px; z-index:10;
-    font:11px/1.8 "Cascadia Mono","Consolas",monospace;
-    color:#5d6672; text-shadow:0 1px 3px #000; pointer-events:none;
-  }
-  #help b { color:#9aa4b0; font-weight:600; }
-  #banner {
-    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-    z-index:20; pointer-events:none; opacity:0;
-    font:600 42px/1 "Segoe UI",system-ui,sans-serif; letter-spacing:.28em;
-    color:#e8eaed; text-shadow:0 4px 30px #000; transition:opacity .35s;
-  }
-  #banner.show { opacity:1; }
-  #banner.dead { color:#ff4d4d; }
-  /* ── 设置面板 ── */
-  #gear {
-    position:fixed; left:16px; bottom:74px; z-index:30;
-    width:38px; height:38px; border-radius:50%; cursor:pointer;
-    display:flex; align-items:center; justify-content:center;
-    font:16px/1 system-ui; color:#cfd3d8;
-    background:rgba(24,20,32,.78); border:1px solid #3d3550;
-    transition:.15s;
-  }
-  #gear:hover { color:#fff; border-color:#8d7bb0; transform:rotate(18deg); }
-  #settings {
-    position:fixed; inset:0; z-index:40; display:none;
-    background:rgba(8,6,12,.86); backdrop-filter:blur(6px);
-    font:13px/1.6 "Segoe UI",system-ui,sans-serif; color:#d8d2e4;
-  }
-  #settings.open { display:flex; align-items:center; justify-content:center; }
-  #settings .panel {
-    width:min(920px,92vw); max-height:86vh; overflow:auto;
-    background:linear-gradient(180deg,#1b1626,#141019);
-    border:1px solid #423a56; border-radius:14px;
-    box-shadow:0 24px 80px rgba(0,0,0,.7);
-  }
-  #settings h2 {
-    margin:0; padding:18px 24px; font:600 16px/1 system-ui; letter-spacing:.12em;
-    border-bottom:1px solid #2c2540; color:#f0e8ff;
-    display:flex; justify-content:space-between; align-items:center;
-  }
-  #settings h2 small { font-size:11px; letter-spacing:0; color:#8d84a3; font-weight:400; }
-  #settings .grid { display:grid; grid-template-columns:1fr 1fr; gap:0 28px; padding:8px 24px 4px; }
-  #settings .sec { padding:14px 0; border-bottom:1px solid #241e34; }
-  #settings .sec h3 { margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em; }
-  #settings .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:9px 0; }
-  #settings .row label { color:#cfc6de; }
-  #settings .row .val { color:#8fd3ff; font-variant-numeric:tabular-nums; min-width:64px; text-align:right; }
-  #settings select, #settings input[type=range] { background:#221c30; border:1px solid #3a3250; color:#e6dff5; border-radius:6px; }
-  #settings select { padding:5px 8px; min-width:140px; }
-  #settings input[type=range] { width:160px; }
-  #settings .pill { display:flex; gap:6px; }
-  #settings .pill button {
-    padding:5px 12px; border-radius:999px; cursor:pointer; font:12px system-ui;
-    background:#221c30; border:1px solid #3a3250; color:#a99cc4;
-  }
-  #settings .pill button.on { background:#4a3a72; border-color:#8d7bb0; color:#fff; }
-  #settings .keys { display:grid; grid-template-columns:repeat(4,1fr); gap:8px 18px; }
-  #settings .keys .krow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 0; }
-  #settings .keys .krow span { color:#cfc6de; }
-  #settings .keys .krow button {
-    min-width:74px; padding:4px 10px; border-radius:6px; cursor:pointer; font:12px ui-monospace,Consolas,monospace;
-    background:#221c30; border:1px solid #3a3250; color:#8fd3ff;
-  }
-  #settings .keys .krow button.rec { border-color:#ff9a4d; color:#ffb066; }
-  #settings .info { padding:14px 24px; font:12px/1.8 ui-monospace,Consolas,monospace; color:#8d84a3; }
-  #settings .info b { color:#cfc6de; font-weight:600; }
-  #settings .info .warn { color:#ffb066; }
-  #settings .foot { padding:14px 24px 18px; display:flex; justify-content:flex-end; gap:10px; }
-  #settings .foot button {
-    padding:8px 18px; border-radius:8px; cursor:pointer; font:13px system-ui;
-    background:#2a2340; border:1px solid #463c60; color:#d8d2e4;
-  }
-  #settings .foot button.primary { background:#5b47a0; border-color:#8d7bb0; color:#fff; }
-</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浮空要塞 · 猩红竞技场</title>
+<link rel="stylesheet" href="./src/game-ui.css">
 </head>
-<body>
-<div id="hud"></div>
-<div id="help">
-  <b>WASD</b> 移动 &nbsp; <b>Shift/Space</b> 翻滚 &nbsp; <b>左键</b> 轻击 &nbsp; <b>F</b> 重击 &nbsp; <b>右键</b> 格挡/弹反 &nbsp; <b>中键</b> 锁定<br>点击战斗画面捕获鼠标 · 移动鼠标转动视角 · <b>Esc</b> 设置<br>
-  <b>F1</b> 判定框 &nbsp; <b>F2</b> 慢放0.25x &nbsp; <b>F3</b> 暂停 &nbsp; <b>R</b> 重开 &nbsp; <b>P</b> 导出帧表JSON
+<body class="booting">
+<main id="hud" aria-label="战斗状态">
+  <section class="player-hud" aria-label="玩家">
+    <div class="portrait" aria-hidden="true"><span></span></div>
+    <div class="player-meters">
+      <div class="player-heading"><strong>玩家</strong><span id="hudStatus" hidden></span></div>
+      <div class="meter player-life" id="playerLife" role="meter" aria-label="玩家生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span></div>
+      <div class="meter-line">
+        <span class="poise-label">韧性</span>
+        <div class="meter player-poise" id="playerPoise" role="meter" aria-label="玩家韧性" aria-valuemin="0"><span class="meter-fill"></span></div>
+        <span class="player-value" id="hudHealth"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="arena-hud" aria-label="当前位置">
+    <div class="arena-heading"><span class="arena-mark" aria-hidden="true"></span><div><p>浮空要塞</p><strong>猩红竞技场</strong></div></div>
+    <div class="performance"><span class="fps"><i aria-hidden="true"></i><span id="hudFps"></span> FPS</span><span id="hudSpeed" hidden></span></div>
+  </section>
+
+  <section class="boss-hud" id="bossHud" aria-label="首领">
+    <div class="boss-heading">
+      <strong>首领</strong>
+      <span class="boss-phase" id="hudPhase"></span>
+    </div>
+    <div class="boss-rule">
+      <div class="meter boss-life" id="bossLife" role="meter" aria-label="首领生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span></div>
+    </div>
+    <div class="meter boss-poise" id="bossPoise" role="meter" aria-label="首领韧性" aria-valuemin="0"><span class="meter-fill"></span></div>
+  </section>
+
+  <pre id="combatDebug" aria-label="战斗调试数据"></pre>
+</main>
+<div id="help" aria-label="战斗操作">
+  <span><kbd data-binding="fwd left back right">W A S D</kbd>移动</span>
+  <span><kbd data-binding="roll">Shift / Space</kbd>翻滚</span>
+  <span><kbd data-binding="light">左键</kbd>轻击</span>
+  <span><kbd data-binding="heavy">F</kbd>重击</span>
+  <span><kbd data-binding="block">右键</kbd>格挡 / 弹反</span>
+  <span><kbd data-binding="lock">中键</kbd>锁定</span>
 </div>
-<div id="banner"></div>
-<button id="gear" title="设置 (Esc)">⚙</button>
-<div id="settings">
-  <div class="panel">
-    <h2>设置 <small>Esc 关闭 · 改动即时生效并记住</small></h2>
-    <div class="grid">
-      <div class="sec">
-        <h3>画质</h3>
-        <div class="row"><label>预设</label>
-          <div class="pill" id="setPreset">
-            <button data-q="low">低</button><button data-q="mid">中</button><button data-q="high">高</button>
+<div class="system-hud">
+  <span class="restart-hint"><kbd>R</kbd>重开</span>
+  <button id="gear" type="button" aria-label="打开设置" aria-haspopup="dialog" title="设置 (Esc)"><span class="gear-mark" aria-hidden="true"></span><span>设置</span><kbd>Esc</kbd></button>
+</div>
+<div id="banner" role="status" aria-live="polite">
+  <div class="banner-inner"><span id="bannerText"></span><span id="bannerHint" hidden><kbd>R</kbd>重新挑战</span></div>
+</div>
+
+<div id="settings" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+  <section class="panel">
+    <header class="settings-head">
+      <span class="settings-seal" aria-hidden="true"><i></i></span>
+      <div><p>浮空要塞</p><h1 id="settingsTitle">设置</h1></div>
+      <button id="setDismiss" class="settings-dismiss" type="button" aria-label="关闭设置" title="关闭设置 (Esc)">×</button>
+    </header>
+    <div class="settings-layout">
+      <div class="settings-nav" role="tablist" aria-label="设置分类" aria-orientation="vertical">
+        <button id="tabVisual" type="button" role="tab" aria-controls="settingsVisual" aria-selected="true">画面</button>
+        <button id="tabInput" type="button" role="tab" aria-controls="settingsInput" aria-selected="false" tabindex="-1">操作</button>
+        <button id="tabSystem" type="button" role="tab" aria-controls="settingsSystem" aria-selected="false" tabindex="-1">硬件与调试</button>
+      </div>
+      <div class="settings-content">
+        <section id="settingsVisual" class="setting-pane" role="tabpanel" aria-labelledby="tabVisual" tabindex="0">
+          <h2>画面</h2>
+          <div class="settings-grid">
+            <section class="sec"><h3>渲染</h3>
+              <div class="row"><span id="presetLabel">画质预设</span><div class="pill" id="setPreset" role="group" aria-labelledby="presetLabel">
+                <button type="button" data-q="low">低</button><button type="button" data-q="mid">中</button><button type="button" data-q="high">高</button>
+              </div></div>
+              <div class="row"><label for="setRes">渲染倍率</label><div class="range-field"><input id="setRes" type="range" min="0.6" max="1.5" step="0.05"><output id="setResVal" for="setRes"></output></div></div>
+              <div class="row"><label for="setSS">超采样</label><select id="setSS">
+                <option value="1">1.0×（原生）</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option>
+              </select></div>
+              <div class="row"><label for="setAA">抗锯齿</label><select id="setAA">
+                <option value="smaa">SMAA</option><option value="fxaa">FXAA</option><option value="off">关</option>
+              </select></div>
+              <div class="row"><label for="setDpr">像素比上限</label><select id="setDpr"><option value="1">1.0</option><option value="1.5">1.5</option><option value="2">2.0</option></select></div>
+            </section>
+            <section class="sec"><h3>场景</h3>
+              <div class="row"><label for="setAO">环境光遮蔽</label><select id="setAO">
+                <option value="off">关</option><option value="low">低（8 采样）</option><option value="mid">中（16 采样）</option><option value="high">高（24 采样）</option>
+              </select></div>
+              <div class="row"><span id="shadowLabel">阴影</span><div class="pill" id="setShadow" role="group" aria-labelledby="shadowLabel">
+                <button type="button" data-v="1">开</button><button type="button" data-v="0">关</button>
+              </div></div>
+              <div class="row"><span id="decorLabel">装饰物</span><div class="pill" id="setDecor" role="group" aria-labelledby="decorLabel">
+                <button type="button" data-v="1">开</button><button type="button" data-v="0">关</button>
+              </div></div>
+              <div class="row"><label for="setFog">雾浓度</label><div class="range-field"><input id="setFog" type="range" min="0" max="1" step="0.05"><output id="setFogVal" for="setFog"></output></div></div>
+              <div class="row"><label for="setSharp">锐度</label><div class="range-field"><input id="setSharp" type="range" min="0" max="1" step="0.05"><output id="setSharpVal" for="setSharp"></output></div></div>
+            </section>
           </div>
-        </div>
-        <div class="row"><label>渲染倍率</label>
-          <input id="setRes" type="range" min="0.6" max="1.5" step="0.05"><span class="val" id="setResVal"></span>
-        </div>
-        <div class="row"><label>环境光遮蔽</label>
-          <select id="setAO">
-            <option value="off">关（最快）</option>
-            <option value="low">低（8 采样）</option>
-            <option value="mid">中（16 采样）</option>
-            <option value="high">高（24 采样）</option>
-          </select>
-        </div>
-        <div class="row"><label>阴影</label>
-          <div class="pill" id="setShadow"><button data-v="1">开</button><button data-v="0">关</button></div>
-        </div>
-        <div class="row"><label>装饰物（藤/叶/花瓣/碎石）</label>
-          <div class="pill" id="setDecor"><button data-v="1">开</button><button data-v="0">关</button></div>
-        </div>
-      </div>
-      <div class="sec">
-        <h3>显示与硬件</h3>
-        <div class="row"><label>设备像素比上限</label>
-          <select id="setDpr"><option value="1">1.0</option><option value="1.5">1.5</option><option value="2">2.0</option></select>
-        </div>
-        <div class="row"><label>锐度</label>
-          <input id="setSharp" type="range" min="0" max="1" step="0.05"><span class="val" id="setSharpVal"></span>
-        </div>
-        <div class="row"><label>超采样</label>
-          <select id="setSS">
-            <option value="1">1.0x（原生）</option>
-            <option value="1.25">1.25x</option>
-            <option value="1.5">1.5x（最清晰，最吃性能）</option>
-          </select>
-        </div>        <div class="row"><label>抗锯齿</label>
-          <select id="setAA">
-            <option value="smaa">SMAA（细节最好）</option>
-            <option value="fxaa">FXAA（最快）</option>
-            <option value="off">关（1.25x 以上超采样可关）</option>
-          </select>
-        </div>
-        <div class="row"><label>雾浓度</label>
-          <input id="setFog" type="range" min="0" max="1" step="0.05"><span class="val" id="setFogVal"></span>
-        </div>
-        <div class="row"><label for="setSensitivity">鼠标视角灵敏度</label>
-          <input id="setSensitivity" type="range" min="0.2" max="3" step="0.1"><span class="val" id="setSensitivityVal"></span>
-        </div>
-        <div class="row"><label for="setFov">视场角 FOV</label>
-          <input id="setFov" type="range" min="30" max="80" step="1"><span class="val" id="setFovVal"></span>
-        </div>
-        <div class="row"><label>显示 FPS</label>
-          <div class="pill" id="setFps"><button data-v="1">显示</button><button data-v="0">隐藏</button></div>
-        </div>
-        <div class="row"><label>显卡 / 垂直同步</label>
-          <div class="pill">
-            <button id="copyGpuCmd">复制独显启动命令</button>
-            <button id="copyVsyncCmd">复制解锁垂直同步命令</button>
+        </section>
+
+        <section id="settingsInput" class="setting-pane" role="tabpanel" aria-labelledby="tabInput" tabindex="0" hidden>
+          <h2>操作</h2>
+          <section class="sec"><h3>镜头</h3>
+            <div class="settings-grid">
+              <div class="row"><label for="setSensitivity">鼠标灵敏度</label><div class="range-field"><input id="setSensitivity" type="range" min="0.2" max="3" step="0.1"><output id="setSensitivityVal" for="setSensitivity"></output></div></div>
+              <div class="row"><label for="setFov">视场角</label><div class="range-field"><input id="setFov" type="range" min="30" max="80" step="1"><output id="setFovVal" for="setFov"></output></div></div>
+            </div>
+          </section>
+          <section class="sec"><h3>按键绑定</h3>
+            <p class="info">点击按键后输入新键，按 Esc 取消。</p>
+            <div class="keys" id="keyList"></div>
+          </section>
+          <div class="fixed-controls"><span><kbd>R</kbd>重开</span><span><kbd>F1</kbd>判定框</span><span><kbd>F2</kbd>慢放</span><span><kbd>F3</kbd>暂停</span><span><kbd>P</kbd>导出帧表</span></div>
+        </section>
+
+        <section id="settingsSystem" class="setting-pane" role="tabpanel" aria-labelledby="tabSystem" tabindex="0" hidden>
+          <h2>硬件与调试</h2>
+          <div class="settings-grid">
+            <section class="sec"><h3>战斗显示</h3>
+              <div class="row"><span id="fpsLabel">FPS</span><div class="pill" id="setFps" role="group" aria-labelledby="fpsLabel">
+                <button type="button" data-v="1">显示</button><button type="button" data-v="0">隐藏</button>
+              </div></div>
+              <div class="row" id="setFrameData" hidden><span id="frameDataLabel">帧数据调参</span><div class="pill" role="group" aria-labelledby="frameDataLabel">
+                <button type="button" data-v="1">显示</button><button type="button" data-v="0">隐藏</button>
+              </div></div>
+              <div class="row"><span>刷新模式</span><output id="vsyncState">检测中…</output></div>
+            </section>
+            <section class="sec"><h3>图形设备</h3>
+              <div id="gpuInfo" class="info"></div>
+              <div class="hardware-actions">
+                <button type="button" id="copyGpuCmd">复制独显启动命令</button>
+                <button type="button" id="copyVsyncCmd">复制解锁帧率命令</button>
+              </div>
+            </section>
           </div>
-        </div>
-        <div class="row"><label>刷新模式</label><span class="val" id="vsyncState">检测中…</span></div>        <div class="info" id="gpuInfo"></div>
+          <div id="nativeSection" class="sec" style="display:none">
+            <h3>桌面应用</h3>
+            <div class="settings-grid">
+              <div class="row"><label for="nativeAngle">图形后端</label><select id="nativeAngle">
+                <option value="vulkan">Vulkan</option><option value="d3d11">D3D11</option><option value="default">跟随系统</option>
+              </select></div>
+              <div class="row"><span id="vsyncLabel">垂直同步</span><div class="pill" id="nativeVsync" role="group" aria-labelledby="vsyncLabel">
+                <button type="button" data-v="1">开</button><button type="button" data-v="0">关</button>
+              </div></div>
+            </div>
+            <div class="hardware-actions"><button type="button" id="nativeApply">应用并重启</button></div>
+            <div id="nativeInfo" class="info"></div>
+          </div>
+          <div id="flagInfo" class="info hardware-note" role="status"></div>
+        </section>
       </div>
     </div>
-    <div class="sec" id="nativeSection" style="display:none; padding:14px 24px;">
-      <h3 style="margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em;">原生壳（Electron）· 改动需要重启应用</h3>
-      <div class="row"><label>图形后端</label>
-        <select id="nativeAngle">
-          <option value="vulkan">Vulkan（独显首选）</option>
-          <option value="d3d11">D3D11</option>
-          <option value="default">跟随系统</option>
-        </select>
-      </div>
-      <div class="row"><label>垂直同步</label>
-        <div class="pill" id="nativeVsync"><button data-v="1">开</button><button data-v="0">关（解锁帧率）</button></div>
-      </div>
-      <div class="row"><label>生效方式</label>
-        <div class="pill"><button id="nativeApply" class="on">应用并重启</button></div>
-      </div>
-      <div class="info" id="nativeInfo"></div>
-    </div>    <div class="sec" style="padding:14px 24px;">
-      <h3 style="margin:0 0 10px; font:600 12px/1 system-ui; color:#a99cc4; letter-spacing:.14em;">按键（点一下再按新键；Esc 取消）</h3>
-      <div class="keys" id="keyList"></div>
-    </div>
-    <div class="info" id="flagInfo"></div>
-    <div class="foot">
-      <button id="setReset">恢复默认</button>
-      <button class="primary" id="setClose">完成</button>
-    </div>
-  </div>
+    <footer class="settings-foot">
+      <p>设置会即时保存</p>
+      <div><button id="setReset" type="button">恢复默认</button><button id="setClose" class="primary" type="button">返回战斗</button></div>
+    </footer>
+  </section>
 </div>
 
 <script type="importmap">

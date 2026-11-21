@@ -23,72 +23,158 @@ function tex(c, { srgb = true, repeat = 1, aniso = 8 } = {}) {
   return t;
 }
 
-/** 台面：同心环状石板 + 勾缝 + 污渍 + 猩红渗色 */
-export function makeFloorTexture(size = 2048, meters = 44) {
-  const c = canvas(size), g = c.getContext('2d');
+// The joints, bevels and roughness are painted from the same slab outlines.
+export function makeFloorTextures(size, meters) {
+  const albedo = canvas(size), height = canvas(size), roughness = canvas(size);
+  const color = albedo.getContext('2d'), relief = height.getContext('2d'), surface = roughness.getContext('2d');
   const px = size / meters;
-  const cx = size / 2, cy = size / 2;
+  let seed = 27413;
+  const random = () => ((seed = Math.imul(seed, 1664525) + 1013904223 >>> 0) / 4294967296);
+  const gray = value => `rgb(${value},${value},${value})`;
+  const trace = (context, points) => {
+    context.beginPath();
+    context.moveTo(points[0][0], points[0][1]);
+    for (const [x, y] of points.slice(1)) context.lineTo(x, y);
+    context.closePath();
+  };
+  function fill(context, points, style) {
+    trace(context, points);
+    context.fillStyle = style;
+    context.fill();
+  }
 
-  g.fillStyle = '#3a3648';
-  g.fillRect(0, 0, size, size);
+  color.fillStyle = '#34313a';
+  relief.fillStyle = '#454545';
+  surface.fillStyle = '#ededed';
+  for (const context of [color, relief, surface]) context.fillRect(0, 0, size, size);
 
-  // 同心石板：每一圈是一环，环内再按角度切段
-  const ring = 0.62 * px;
-  for (let r = 0.2 * px; r < (meters / 2) * px; r += ring) {
-    const n = Math.max(18, Math.round((Math.PI * 2 * r) / (ring * 2.4)));
-    for (let i = 0; i < n; i++) {
-      const a0 = (i / n) * Math.PI * 2;
-      const a1 = ((i + 1) / n) * Math.PI * 2;
-      const v = 0.9 + rnd() * 0.22;
-      const base = [58, 54, 70];
-      g.fillStyle = `rgb(${Math.round(base[0] * v)},${Math.round(base[1] * v)},${Math.round(base[2] * v)})`;
-      g.beginPath();
-      g.arc(cx, cy, r + ring * 0.92, a0, a1);
-      g.arc(cx, cy, r, a1, a0, true);
-      g.closePath();
-      g.fill();
+  let row = 0;
+  for (let y = -0.5 * px; y < size; row++) {
+    const depth = (row % 5 === 0 ? 0.95 : 0.65 + random() * 0.58) * px;
+    for (let x = -((row % 2) * 0.95 + random()) * px; x < size;) {
+      const width = (1.08 + random() * 1.30) * px;
+      const gap = px * (0.018 + random() * 0.021);
+      const chip = () => px * (0.022 + random() * 0.067);
+      const outline = [
+        [x + gap + chip(), y + gap], [x + width - gap - chip(), y + gap * 0.78],
+        [x + width - gap, y + gap + chip()], [x + width - gap * 1.35, y + depth - gap - chip()],
+        [x + width - gap - chip(), y + depth - gap], [x + gap + chip(), y + depth - gap * 1.25],
+        [x + gap, y + depth - gap - chip()], [x + gap * 0.85, y + gap + chip()],
+      ];
+      const tone = Math.round(65 + random() * 21);
+      const face = color.createLinearGradient(x, y, x + width, y + depth);
+      face.addColorStop(0, `rgb(${tone + 5},${tone + 4},${tone + 11})`);
+      face.addColorStop(1, `rgb(${tone - 3},${tone - 4},${tone + 3})`);
+      fill(color, outline, face);
+      color.strokeStyle = 'rgba(178,166,157,0.25)';
+      color.lineWidth = Math.max(0.6, px * 0.014);
+      color.stroke();
+
+      fill(relief, outline, gray(174 + Math.round(random() * 16)));
+      relief.lineWidth = Math.max(1.0, px * 0.024);
+      relief.strokeStyle = '#777777';
+      relief.stroke();
+
+      const polish = Math.hypot(x + width * 0.5 - size * 0.5, y + depth * 0.5 - size * 0.5) / size;
+      fill(surface, outline, gray(Math.round(143 + Math.min(1, polish * 2.2) * 67 + random() * 21)));
+      x += width;
+    }
+    y += depth;
+  }
+
+  // Pale mineral deposits and damp patches vary over the whole arena, beyond the tile scale.
+  for (let i = 0; i < 96; i++) {
+    const x = random() * size, y = random() * size, radius = px * (0.35 + random() * 1.8);
+    const stain = color.createRadialGradient(x, y, 0, x, y, radius);
+    stain.addColorStop(0, i % 4 ? 'rgba(36,31,36,0.20)' : 'rgba(150,129,106,0.20)');
+    stain.addColorStop(1, 'rgba(0,0,0,0)');
+    color.fillStyle = stain;
+    color.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+  }
+
+  return { map: tex(albedo, { aniso: 16 }), normalMap: makeNormalMap(height, 2.5),
+    roughnessMap: tex(roughness, { srgb: false }) };
+}
+
+// This layer is baked into the color map. Rendering uses the same samples as before.
+export function layerStoneGrain(target, source, repeats, strength) {
+  const { width, height } = target.image;
+  const tile = canvas(Math.max(1, Math.round(width / repeats)));
+  const brush = tile.getContext('2d');
+  brush.filter = 'grayscale(1) brightness(1.55)';
+  brush.drawImage(source, 0, 0, tile.width, tile.height);
+  const context = target.image.getContext('2d');
+  context.save();
+  context.globalCompositeOperation = 'overlay';
+  context.globalAlpha = strength;
+  context.fillStyle = context.createPattern(tile, 'repeat');
+  context.fillRect(0, 0, width, height);
+  context.restore();
+  target.needsUpdate = true;
+}
+
+export function paintFloorContact(map, meters, x, z, width, depth, yaw = 0, opacity = 0.54) {
+  const size = map.image.width, px = size / meters;
+  const g = map.image.getContext('2d');
+  g.save();
+  g.translate(size * 0.5 + x * px, size * 0.5 - z * px);
+  g.rotate(yaw);
+  g.scale(width * px, depth * px);
+  const shade = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+  shade.addColorStop(0, `rgba(13,10,15,${opacity})`);
+  shade.addColorStop(0.50, `rgba(16,13,19,${opacity * 0.74})`);
+  shade.addColorStop(1, 'rgba(16,13,19,0)');
+  g.fillStyle = shade;
+  g.fillRect(-1, -1, 2, 2);
+  g.restore();
+  map.needsUpdate = true;
+}
+
+export function makeMasonryTextures(low) {
+  const width = low ? 1024 : 2048, height = low ? 256 : 512;
+  const albedo = canvas(width, height), depth = canvas(width, height);
+  const color = albedo.getContext('2d'), relief = depth.getContext('2d');
+  color.fillStyle = '#27262d';
+  color.fillRect(0, 0, width, height);
+  relief.fillStyle = '#444';
+  relief.fillRect(0, 0, width, height);
+
+  for (let row = 0; row < 36; row++) {
+    const y = row * height / 36;
+    const h = height / 36;
+    for (let x = (row % 2 ? -.59 : -.03) * width / 95; x < width;) {
+      const w = width / 95 * (.68 + rnd() * .69);
+      const gapX = width * .00044, gapY = Math.max(.56, h * .048);
+      const lum = 62 + Math.floor(rnd() * 27);
+      color.fillStyle = `rgb(${lum},${lum - 3},${lum + 7})`;
+      color.fillRect(x + gapX, y + gapY, w - gapX * 2, h - gapY * 2);
+      color.fillStyle = '#e2d5c82b';
+      color.fillRect(x + gapX, y + gapY, w - gapX * 2, .53);
+      relief.fillStyle = '#bdbdbd';
+      relief.fillRect(x + gapX, y + gapY, w - gapX * 2, h - gapY * 2);
+      x += w;
     }
   }
-
-  // 勾缝
-  g.strokeStyle = 'rgba(18,15,24,0.8)';
-  g.lineWidth = Math.max(1, px * 0.03);
-  for (let r = 0.2 * px; r < (meters / 2) * px; r += ring) {
-    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+  for (let i = 0; i < 95; i++) {
+    const x = rnd() * width, y = rnd() * height, w = width * (.002 + rnd() * .013);
+    const runoff = color.createLinearGradient(0, y, 0, y + height * .28);
+    runoff.addColorStop(0, '#1c1b2863');
+    runoff.addColorStop(1, '#1c1b2800');
+    color.fillStyle = runoff;
+    color.fillRect(x, y, w, height * .28);
   }
-  for (let i = 0; i < 72; i++) {
-    const a = (i / 72) * Math.PI * 2;
-    g.beginPath();
-    g.moveTo(cx + Math.cos(a) * ring * 0.6, cy + Math.sin(a) * ring * 0.6);
-    g.lineTo(cx + Math.cos(a) * (meters / 2) * px, cy + Math.sin(a) * (meters / 2) * px);
-    g.stroke();
-  }
+  return { map: tex(albedo), normalMap: makeNormalMap(depth, 2.15) };
+}
 
-  // 石面脏迹：一堆半透明斑块
-  for (let i = 0; i < 900; i++) {
-    const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * (meters / 2) * px;
-    const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
-    const rad = (0.08 + rnd() * 0.5) * px;
-    const dark = rnd() > 0.45;
-    g.fillStyle = dark ? `rgba(16,13,22,${0.03 + rnd() * 0.07})` : `rgba(150,142,170,${0.02 + rnd() * 0.04})`;
-    g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
-  }
-
-  // 猩红渗色：只压在最外一圈，参考图里血迹沿边缘最重、中心是干净的
-  for (let i = 0; i < 22; i++) {
-    const a = rnd() * Math.PI * 2;
-    const rr = (0.72 + rnd() * 0.26) * (meters / 2) * px;
-    const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
-    const rad = (0.5 + rnd() * 2.0) * px;
-    const gr = g.createRadialGradient(x, y, 0, x, y, rad);
-    gr.addColorStop(0, 'rgba(110,8,24,0.3)');
-    gr.addColorStop(0.55, 'rgba(88,6,20,0.12)');
-    gr.addColorStop(1, 'rgba(60,4,14,0)');
-    g.fillStyle = gr;
-    g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
-  }
-
-  return tex(c, { aniso: 16 });
+export function makeRadialGlow() {
+  const c = canvas(128), g = c.getContext('2d');
+  const glow = g.createRadialGradient(64, 64, 0, 64, 64, 63);
+  glow.addColorStop(0, '#ffffffbd');
+  glow.addColorStop(.38, '#ffffff55');
+  glow.addColorStop(1, '#ffffff00');
+  g.fillStyle = glow;
+  g.fillRect(0, 0, 128, 128);
+  return tex(c);
 }
 
 /** 金色魔法阵：透明底，只画线，叠在台面上做加法混合 */
@@ -192,6 +278,25 @@ export function makeBannerTexture() {
     g.fillRect(x, 0, ww, h);
   }
 
+  // Alternating thread crossings catch light at a different angle from the dyed wool.
+  for (let y = 0; y < h; y += 3) {
+    g.fillStyle = y % 2 ? '#ecc29a15' : '#21030d24';
+    g.fillRect(0, y, w, .75);
+  }
+  for (let x = 0; x < w; x += 4) {
+    g.fillStyle = x % 12 ? '#f3afa818' : '#27020e38';
+    g.fillRect(x, 0, 1, h);
+  }
+  g.strokeStyle = '#d39d67b3';
+  g.lineWidth = 2;
+  for (const x of [12, 17, w - 17, w - 12]) {
+    g.beginPath(); g.moveTo(x, 10); g.lineTo(x, h - 13); g.stroke();
+  }
+  g.strokeStyle = '#30121b87';
+  g.setLineDash([2, 4]);
+  g.strokeRect(9, 8, w - 18, h - 22);
+  g.setLineDash([]);
+
   // 徽记：向上收拢的尖顶十字 + 环
   g.strokeStyle = 'rgba(232,196,148,0.85)';
   g.lineWidth = 6;
@@ -227,32 +332,49 @@ export function makeFlameTexture(color = [255, 190, 120]) {
   return tex(c);
 }
 
-/** 雾团：一堆软斑，做云海 */
-export function makeCloudTexture() {
-  const s = 512, c = canvas(s), g = c.getContext('2d');
-  for (let i = 0; i < 26; i++) {
-    const x = s / 2 + (rnd() - 0.5) * s * 0.66;
-    const y = s / 2 + (rnd() - 0.5) * s * 0.5;
-    const r = s * (0.08 + rnd() * 0.22);
-    const gr = g.createRadialGradient(x, y, 0, x, y, r);
-    gr.addColorStop(0, `rgba(226,214,232,${0.16 + rnd() * 0.12})`);
-    gr.addColorStop(1, 'rgba(200,186,214,0)');
-    g.fillStyle = gr;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-  }
-  return tex(c);
-}
-
-/** 猩红枝叶：一簇小叶片，用于场边灌木 */
+// A whole shoot is mapped to each leaf card, with distinct leaves, veins and smaller branches.
 export function makeLeafTexture() {
-  const s = 256, c = canvas(s), g = c.getContext('2d');
-  for (let i = 0; i < 90; i++) {
-    const x = rnd() * s, y = rnd() * s;
-    const a = rnd() * Math.PI, l = 6 + rnd() * 13, w = 3 + rnd() * 6;
-    g.save(); g.translate(x, y); g.rotate(a);
-    const shade = 0.55 + rnd() * 0.45;
-    g.fillStyle = `rgba(${Math.round(150 * shade + 40)},${Math.round(16 * shade)},${Math.round(34 * shade + 8)},${0.5 + rnd() * 0.4})`;
-    g.beginPath(); g.ellipse(0, 0, l, w, 0, 0, Math.PI * 2); g.fill();
+  const c = canvas(256), g = c.getContext('2d');
+  const stem = [
+    [4, 198], [54, 165], [111, 133], [169, 99], [246, 55],
+  ];
+  g.lineCap = 'round';
+  g.strokeStyle = '#573135';
+  g.lineWidth = 2.5;
+  g.beginPath();
+  g.moveTo(...stem[0]);
+  for (const [x, y] of stem.slice(1)) g.lineTo(x, y);
+  g.stroke();
+  for (let i = 0; i < 35; i++) {
+    const t = (i + 1) / 36, side = i % 2 ? 1 : -1;
+    const x = 12 + 229 * t, y = 193 - 135 * t;
+    const angle = -0.5 + side * (0.36 + rnd() * .91);
+    const l = 15 + rnd() * 26, w = l * (.20 + rnd() * .15);
+    const hue = 125 + Math.floor(rnd() * 66);
+    g.save();
+    g.translate(x, y);
+    g.rotate(angle);
+    const gradient = g.createLinearGradient(0, -w, 0, w);
+    gradient.addColorStop(0, `rgb(${hue},${44+i%11},${46+i%9})`);
+    gradient.addColorStop(.53, `rgb(${hue+15},${47+i%19},${38+i%16})`);
+    gradient.addColorStop(1, '#572632');
+    g.fillStyle = gradient;
+    g.beginPath();
+    g.moveTo(0, 0);
+    g.quadraticCurveTo(l * .43, -w * 1.35, l, 0);
+    g.quadraticCurveTo(l * .56, w * 1.16, 0, 0);
+    g.fill();
+    g.strokeStyle = '#efb29560';
+    g.lineWidth = .65;
+    g.beginPath(); g.moveTo(1, 0); g.lineTo(l * .92, 0); g.stroke();
+    for (let vein = 1; vein < 4; vein++) {
+      g.beginPath();
+      g.moveTo(l * vein * .19, 0);
+      g.lineTo(l * (vein * .19 + .19), -w * .57);
+      g.moveTo(l * vein * .19, 0);
+      g.lineTo(l * (vein * .19 + .18), w * .48);
+      g.stroke();
+    }
     g.restore();
   }
   return tex(c);
@@ -458,75 +580,6 @@ export function makeReliefAlbedo(relief, stone, tint = '140,132,168', tintAlpha 
 
   return tex(c);
 }
-/**
- * 地面浮雕高度图：石板分块 + 倒角勾缝 + 缺角 + 磨损。
- * 灰度即高度：0 深、1 高。铺在台面法线上，低头看才有石板的厚度。
- */
-export function makeFloorRelief(size = 1024, cells = 4) {
-  const c = canvas(size), g = c.getContext('2d');
-  const S = size, step = S / cells, gap = S * 0.012;
-
-  g.fillStyle = 'rgb(64,64,64)';       // 勾缝底（凹）
-  g.fillRect(0, 0, S, S);
-
-  for (let j = 0; j < cells; j++) {
-    for (let i = 0; i < cells; i++) {
-      const x = i * step + gap, y = j * step + gap;
-      const w = step - gap * 2, h = step - gap * 2;
-      const v = 150 + Math.random() * 40;
-
-      // 板面：中间略高，四周收边（模拟微鼓的石板）
-      const grd = g.createRadialGradient(x + w / 2, y + h / 2, w * 0.1, x + w / 2, y + h / 2, w * 0.72);
-      grd.addColorStop(0, `rgb(${v + 18 | 0},${v + 18 | 0},${v + 18 | 0})`);
-      grd.addColorStop(0.75, `rgb(${v | 0},${v | 0},${v | 0})`);
-      grd.addColorStop(1, `rgb(${v - 34 | 0},${v - 34 | 0},${v - 34 | 0})`);
-      g.fillStyle = grd;
-      g.beginPath();
-      g.roundRect(x, y, w, h, S * 0.006);
-      g.fill();
-
-      // 左上倒角高光 / 右下倒角阴影
-      g.strokeStyle = 'rgba(225,225,225,0.55)';
-      g.lineWidth = S * 0.006;
-      g.beginPath();
-      g.moveTo(x + w * 0.04, y + h - w * 0.04);
-      g.lineTo(x + w * 0.04, y + w * 0.04);
-      g.lineTo(x + w - w * 0.04, y + w * 0.04);
-      g.stroke();
-
-      g.strokeStyle = 'rgba(40,40,40,0.6)';
-      g.beginPath();
-      g.moveTo(x + w - w * 0.04, y + w * 0.04);
-      g.lineTo(x + w - w * 0.04, y + h - w * 0.04);
-      g.lineTo(x + w * 0.04, y + h - w * 0.04);
-      g.stroke();
-
-      // 缺角 / 崩边
-      for (let k = 0; k < 3; k++) {
-        if (Math.random() > 0.55) continue;
-        g.fillStyle = 'rgba(50,50,50,0.75)';
-        g.beginPath();
-        g.arc(x + Math.random() * w, y + Math.random() * h, S * (0.004 + Math.random() * 0.012), 0, Math.PI * 2);
-        g.fill();
-      }
-    }
-  }
-
-  // 整体磨损：几块淡的大斑，避免 4×4 太规整
-  for (let i = 0; i < 40; i++) {
-    const x = Math.random() * S, y = Math.random() * S;
-    const r = S * (0.02 + Math.random() * 0.09);
-    const grd = g.createRadialGradient(x, y, 0, x, y, r);
-    const dark = Math.random() > 0.5;
-    grd.addColorStop(0, dark ? 'rgba(60,60,60,0.25)' : 'rgba(210,210,210,0.18)');
-    grd.addColorStop(1, 'rgba(128,128,128,0)');
-    g.fillStyle = grd;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-  }
-
-  return c;
-}
-
 /**
  * 柱身浮雕高度图：竖向凹槽（fluting）+ 上下柱头束带 + 裂纹。
  * 圆柱 UV 是「一圈 × 一段」，所以横向一条槽会自然变成柱身的一道凹槽。
