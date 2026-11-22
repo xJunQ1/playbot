@@ -194,7 +194,7 @@ export function createSettings(ctx) {
   // ── 按键重绑定 ────────────────────────────────────────────
   const KEY_LABELS = {
     fwd: '前进', back: '后退', left: '左移', right: '右移',
-    roll: '翻滚', light: '轻击', heavy: '重击', block: '格挡', lock: '锁定目标',
+    roll: '翻滚', light: '轻击', heavy: '重击', block: '格挡', lock: '锁定目标', ultimate: '释放大招',
   };
   let recording = null;    // 正在录制的动作名
 
@@ -211,7 +211,7 @@ export function createSettings(ctx) {
   }
 
   function renderKeys() {
-    for (const key of document.querySelectorAll('#help [data-binding]')) {
+    for (const key of document.querySelectorAll('#help [data-binding], #hud [data-binding]')) {
       const actions = key.dataset.binding.split(' ');
       const labels = actions.map(action => (keymap[action] ?? []).map(code =>
         keyName(code).replace('鼠标', '').replace(/^[LR]-Shift$/, 'Shift')

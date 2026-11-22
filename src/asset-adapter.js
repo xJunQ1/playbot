@@ -303,7 +303,7 @@ export class ModelBinder {
   }
 
   // 每渲染帧更新姿态，Boss 出招时用逻辑帧定位动画。
-  update(actor, dt, { key = this._clipKey(actor), sampleTime, fade, groundFeet = false } = {}) {
+  update(actor, dt, { key = this._clipKey(actor), sampleTime, fade, groundFeet = false, poseFrame = actor.frame } = {}) {
     const targetName = this.clipMap[key];
 
     if (targetName && targetName !== this.currentName) {
@@ -356,7 +356,7 @@ export class ModelBinder {
       }
     }
 
-    const manualFrames = actor.state === 'parried' ? actor.stunTimer : actor.backstep?.frames
+    const manualFrames = (actor.state === 'parried' || actor.state === 'ultimateStun') ? actor.stunTimer : actor.backstep?.frames
       ?? (actor.isBoss && actor.move && !actor.move.grab ? totalFrames(actor.move) : actor.recoveryFrames);
     if (sampleTime !== undefined && this.currentName === targetName) {
       this.current.paused = true;
@@ -364,7 +364,7 @@ export class ModelBinder {
     } else if (manualFrames && this.currentName === targetName) {
       // 以逻辑帧采样出招、后撤和弹反硬直，慢放或命中停顿时动作跟随判定。
       this.current.paused = true;
-      this.current.time = this.current.getClip().duration * actor.frame / manualFrames;
+      this.current.time = this.current.getClip().duration * poseFrame / manualFrames;
     }
     this.mixer.update(dt);
     if (this.solePatches) this.groundPose(actor, dt, groundFeet);
@@ -413,7 +413,7 @@ export class ModelBinder {
     // 不能用 `state === 'light1' || 'light2' || 'heavy'` 那种写法 —— || 链恒为真，
     // 会把 'light1' 当成键去查 p_light1 的动画，永远查不到。
     if (actor.move?.grab) return 'idle';
-    if (actor.state === 'parried' || actor.state === 'grabbed' || actor.state === 'launched' || actor.state === 'wallstun') return 'hitstun';
+    if (actor.state === 'parried' || actor.state === 'ultimateStun' || actor.state === 'grabbed' || actor.state === 'launched' || actor.state === 'wallstun') return 'hitstun';
     if (actor.moveId) return actor.moveId;
     // 格挡时走动要播行走动画，否则原地循环 + 代码位移 = 滑行
     if (actor.state === 'block' && actor.moving) return 'blockmove';

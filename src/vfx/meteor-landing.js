@@ -24,9 +24,9 @@ function sheet(width, height, fragmentShader, additive = false) {
   return mesh;
 }
 
-export function createMeteorLanding(scene, position, surface) {
+export function createMeteorLanding(scene, position, surface, { lava = false, radius = 2.10 } = {}) {
   const root = new THREE.Group();
-  root.name = 'boss-meteor-landing';
+  root.name = lava ? 'boss-smash-lava-impact' : 'boss-meteor-landing';
   position = position.clone();
   root.position.copy(position);
   scene.add(root);
@@ -66,7 +66,7 @@ export function createMeteorLanding(scene, position, surface) {
   flare.position.y = 0.25;
   root.add(flare);
 
-  const crater = new THREE.Mesh(buildBasinGeometry(), surface.basin);
+  const crater = new THREE.Mesh(buildBasinGeometry(), lava ? surface.lavaBasin : surface.basin);
   crater.name = 'boss-impact-crater';
   crater.receiveShadow = true;
   root.add(crater);
@@ -114,7 +114,7 @@ export function createMeteorLanding(scene, position, surface) {
   return {
     update(age, sinceImpact, altitude, camera, opacity) {
       const airborne = sinceImpact < 0;
-      plume.visible = sinceImpact < 0.20;
+      plume.visible = !lava && sinceImpact < 0.20;
       if (plume.visible) {
         plume.quaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP,
           Math.atan2(camera.position.x-position.x, camera.position.z-position.z));
@@ -130,11 +130,12 @@ export function createMeteorLanding(scene, position, surface) {
       }
       shock.visible = !airborne && sinceImpact < 0.68;
       if (airborne) return;
-      const footprint = opacity > 0 ? lerp(.72, 2.10, smoothstep(sinceImpact, 0, .19)) * Math.sqrt(opacity) : 0;
+      const footprint = opacity > 0 ? lerp(.72, radius, smoothstep(sinceImpact, 0, .19)) * Math.sqrt(opacity) : 0;
       surface.set(position, footprint);
       crater.visible = footprint > .001;
       crater.scale.set(footprint, Math.min(1, footprint), footprint);
-      surface.heat.value = Math.exp(-1.8 * sinceImpact);
+      surface.heat.value = Math.exp(-(lava ? .42 : 1.8) * sinceImpact) * opacity;
+      if (lava) surface.flow.value = sinceImpact;
       if (shock.visible) {
         shock.scale.setScalar(0.45 + 4.2*(1-(1-sinceImpact/0.68)**2));
         shock.material.uniforms.time.value = sinceImpact;
@@ -142,7 +143,8 @@ export function createMeteorLanding(scene, position, surface) {
       }
       fragments.forEach(({ x, z, angle, flying, radius, size, flight, height }, i) => {
         const t = Math.min(1, sinceImpact / flight);
-        const spread = flying ? lerp(.22, radius, t) : radius * lerp(.74, 1, smoothstep(t, 0, .43));
+        const reach = radius * (lava ? 1.27 : 1);
+        const spread = flying ? lerp(.22, reach, t) : reach * lerp(.74, 1, smoothstep(t, 0, .43));
         const lift = flying ? height * 4 * t * (1 - t) : .14 * Math.sin(Math.PI * t);
         const scale = size * Math.min(1, opacity * 3);
         dummy.position.set(x * spread, lift + scale * .30 - .02 - (1 - opacity) * .28, z * spread);

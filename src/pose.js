@@ -306,35 +306,36 @@ export function poseAttack(move, frame) {
 }
 
 /** 统一入口：给定 actor，返回这一帧该摆的姿势 */
-export function poseFor(actor, clock, getUp = 0) {
+export function poseFor(actor, clock, getUp = 0, frame = actor.frame) {
   switch (actor.state) {
     case 'idle':
     case 'move':
       return actor.state === 'move' ? poseMove(clock) : poseIdle(clock);
     case 'backstep':
-      return poseMove(1 - 0.5 * actor.frame / actor.backstep.frames);
+      return poseMove(1 - 0.5 * frame / actor.backstep.frames);
     case 'roll':
-      return poseRoll(actor.frame, actor.rollTotal ?? 33);
+      return poseRoll(frame, actor.rollTotal ?? 33);
     case 'block':
-      return poseBlock(actor.frame);
+      return poseBlock(frame);
     case 'grabbed':
       return poseHit(4, 14);
     case 'launched':
       return poseHit(2, 14);
     case 'wallstun':
       return mixPose(poseHit(2, 14), actor.hp <= 0 ? poseDead(DEATH_POSE_FRAMES) : poseIdle(clock), getUp);
+    case 'ultimateStun':
     case 'parried':
     case 'hitstun':
-      return poseHit(actor.frame, actor.stunTimer || 14);
+      return poseHit(frame, actor.stunTimer || 14);
     case 'guardbreak':
-      return poseGuardbreak(actor.frame);
+      return poseGuardbreak(frame);
     case 'dead':
-      return poseDead(actor.frame);
+      return poseDead(frame);
     case 'attack':
     case 'light1':
     case 'light2':
     case 'heavy':
-      return actor.move && !actor.move.grab ? poseAttack(actor.move, actor.frame) : poseIdle(clock);
+      return actor.move && !actor.move.grab ? poseAttack(actor.move, frame) : poseIdle(clock);
     default:
       return poseIdle(clock);
   }

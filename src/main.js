@@ -18,6 +18,13 @@ import { FootIK } from './footik.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 import { guardFromAO } from './vfx/ao-guard.js';
 import { GroundScratch } from './vfx/scratch.js';
+import { PerfectDodgeEffect } from './vfx/perfect-dodge.js';
+import { UltimateEffect } from './vfx/ultimate.js';
+import { ULTIMATE_END, ULTIMATE_CANCEL_FROM, ULTIMATE_CAMERA_RETURN, ULTIMATE_CUTS, ULTIMATE_KICKS, ULTIMATE_STAGGER,
+  FINISHER, createUltimateCast, ultimateStep, ultimateSourceFrame, ultimateFallbackPose, startFinisher, finisherRun,
+  loadPlayerUltimate, loadNativeClip } from './ultimate.js';
+import { METEOR, meteorFrame, newMeteorSmash, updateMeteorSmash } from './meteor-smash.js';
+import { BossSmashEffect } from './vfx/boss-smash.js';
 import { clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
 
 // ═══════════════════════════════════════════════════════════════
@@ -45,10 +52,17 @@ function moveRevision(moves) {
   return (h >>> 0).toString(16);
 }
 const MOVES_REV = moveRevision(MOVES);
+const PRE_METEOR_DESCENT_REV = moveRevision({
+  ...MOVES, b_meteor: { ...MOVES.b_meteor, startup: METEOR.impact },
+});
 // 新增招式时，上一版的调参存档仍适用于原有招式。
-const priorMoves = Object.fromEntries(Object.entries(MOVES).filter(([id]) => id !== 'b_grab'));
+const preMeteorMoves = Object.entries(MOVES).filter(([id]) => id !== 'b_meteor');
+const PRE_METEOR_MOVES_REV = moveRevision(Object.fromEntries(preMeteorMoves));
+const priorMoves = Object.fromEntries(preMeteorMoves.filter(([id]) => id !== 'b_grab'));
 const PRIOR_MOVES_REV = moveRevision(priorMoves);
 const GRAB_TEST_MOVES_REV = '5ca4ea42'; // Finalized grab recovery is longer than this save format's default.
+const PRE_POISE_REVISIONS = ['1f85fb6a', 'c596bfa4', 'bcbe563f'];
+const BOSS_POISE_UPDATED = new Set(['b_sweep', 'b_slam', 'b_heavy_combo']);
 const ORIGINAL_GRAB_MOVES_REV = 'ac84b67d'; // 旧擒拿配置的命中范围不在存档字段内。
 const LEGACY_MOVES_REV = moveRevision(Object.fromEntries(Object.entries(priorMoves)
   .filter(([id]) => id !== 'b_heavy_combo')));
@@ -106,9 +120,17 @@ async function tuningLoad() {
     try { data = JSON.parse(localStorage.getItem(TUNING_KEY) || 'null'); } catch { data = null; }
   }
   // 没有 rev 字段的老存档（或 rev 对不上）= 招式数值不可信，整块丢弃
-  const revOk = !data || !data.moves || [MOVES_REV, GRAB_TEST_MOVES_REV, ORIGINAL_GRAB_MOVES_REV, PRIOR_MOVES_REV, LEGACY_MOVES_REV].includes(data.rev);
+  const revOk = !data || !data.moves || [MOVES_REV, PRE_METEOR_DESCENT_REV, PRE_METEOR_MOVES_REV, GRAB_TEST_MOVES_REV, ORIGINAL_GRAB_MOVES_REV, PRIOR_MOVES_REV, LEGACY_MOVES_REV, ...PRE_POISE_REVISIONS].includes(data.rev);
   if (!revOk) {
     console.warn(`[tuning] 招式表代码已更新（rev ${data.rev} → ${MOVES_REV}），旧存档的招式数值作废，改用代码里的数字`);
+  }
+  if (revOk && data?.moves && data.rev !== MOVES_REV) {
+    for (const id of BOSS_POISE_UPDATED) {
+      if (data.moves[id]?.poise === 0) delete data.moves[id].poise;
+    }
+  }
+  if (data?.rev === PRE_METEOR_DESCENT_REV && data.moves?.b_meteor?.startup === METEOR.impact) {
+    delete data.moves.b_meteor.startup;
   }
   const savedGrab = revOk ? data?.moves?.b_grab : null;
   if (typeof savedGrab?.recovery === 'number' && savedGrab.recovery < GRAB_TIMING.recover) {
@@ -284,7 +306,6 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.
 // bloom.setSize(innerWidth, innerHeight);
 // composer.addPass(bloom);
 
-composer.addPass(vfx.guardImpact.pass);
 composer.addPass(new OutputPass());
 
 // 锐化（unsharp mask，3x3）：把高频细节拉回来，抵消 FXAA/上采样带来的软
@@ -341,8 +362,15 @@ function syncSharpen() {
 }
 syncSharpen();
 composer.addPass(sharpen);
+// The heat ripple warps the finished frame, including the swords and sparks.
+const dodgeEffect = new PerfectDodgeEffect(scene);
+const ultimateEffect = new UltimateEffect(scene);
+const bossSmashEffect = new BossSmashEffect(scene, STAGE.impactSurface);
+composer.addPass(bossSmashEffect.pass);
+composer.addPass(dodgeEffect.pass);
+composer.addPass(vfx.guardImpact.pass);
 
-// ── 画质档位：低 / 中 / 高，Q 键循环
+// ── 画质档位：低 / 中 / 高，F4 键循环
 //  只动「渲染分辨率 / 环境光遮蔽 / 装饰物件」，不改光照数量（改灯会触发着色器重编译）
 const QUALITY = {
   low: { res: 0.7, ao: false, decor: false, label: '低' },
@@ -362,7 +390,9 @@ function applyQuality(name) {
   STAGE.setDecor(q.decor);
 }
 addEventListener('keydown', (e) => {
-  if (!document.getElementById('settings').classList.contains('open') && e.key.toLowerCase() === 'q') {
+  if (e.code === 'F4' && !e.repeat && !KEYMAP[e.code] &&
+      !document.getElementById('settings').classList.contains('open')) {
+    e.preventDefault();
     const order = ['low', 'mid', 'high'];
     const next = order[(order.indexOf((window.__settingsApi?.state().preset) || qualityName) + 1) % order.length];
     if (window.__settingsApi) window.__settingsApi.applyPreset(next);
@@ -411,7 +441,7 @@ const pressedAt = Object.create(null);
 const DEFAULT_KEYS = {
   fwd: ['KeyW'], back: ['KeyS'], left: ['KeyA'], right: ['KeyD'],
   roll: ['ShiftLeft', 'Space'],
-  light: ['Mouse0'], heavy: ['KeyF'], block: ['Mouse2'], lock: ['Mouse1'],
+  light: ['Mouse0'], heavy: ['KeyF'], block: ['Mouse2'], lock: ['Mouse1'], ultimate: ['KeyQ'],
 };
 const ACTION_KEYS = (() => {
   try {
@@ -422,6 +452,11 @@ const ACTION_KEYS = (() => {
           const next = DEFAULT_KEYS[action][0];
           if (saved[action]?.length === 1 && saved[action][0] === old &&
               !Object.values(saved).some(codes => codes.includes(next))) saved[action] = [next];
+        }
+      }
+      if (!Object.hasOwn(saved, 'ultimate')) {
+        for (const [action, codes] of Object.entries(saved)) {
+          if (Array.isArray(codes)) saved[action] = codes.filter(code => code !== 'KeyQ');
         }
       }
       return Object.assign({}, DEFAULT_KEYS, saved);
@@ -503,7 +538,8 @@ document.addEventListener('pointerlockchange', () => {
   hadPointerLock = locked;
 });
 canvas.addEventListener('mousemove', e => {
-  if (!combatReady || settingsOpen() || CFG.paused || player.lockOn || bossIntro) return;
+  if (!combatReady || settingsOpen() || CFG.paused || player.lockOn || bossIntro ||
+      (ultimateCast && !ultimateCast.cameraReturned)) return;
   const speed = 0.0025 * settings.state().sensitivity;
   const deltaYaw = -e.movementX * speed;
   if (railOrbit && !grabSequence) railOrbit.mouseYaw += deltaYaw;
@@ -538,6 +574,9 @@ class Actor {
     this.yaw = Math.PI;
     this.hp = hp; this.maxHp = hp;
     this.poise = poise; this.maxPoise = poise;
+    this.poiseRegenAt = 0;
+    this.poiseRecoverySlowed = false;
+    this.counterUntil = 0;
     this.hurt = hurt;               // { radius, height }
     this.state = 'idle';
     this.moveId = null;
@@ -550,6 +589,10 @@ class Actor {
     this.stunTimer = 0;
     this.flashTimer = 0;
     this.footIK = new FootIK();
+    this.previousPosition = this.pos.clone();
+    this.previousYaw = this.yaw;
+    this.previousFrame = this.frame;
+    this.previousAction = this.actionSequence;
     scene.add(this.mesh.group);
 
     // 判定可视化
@@ -643,9 +686,26 @@ class Actor {
     this.yaw += diff;
   }
 
-  syncMesh() {
-    this.mesh.group.position.copy(this.pos);
-    this.mesh.group.rotation.set(0, this.yaw, 0, 'YXZ');
+  rememberVisualFrame() {
+    this.previousPosition.copy(this.pos);
+    this.previousYaw = this.yaw;
+    this.previousFrame = this.frame;
+    this.previousAction = this.actionSequence;
+  }
+
+  samplePosition(alpha, target) {
+    return target.lerpVectors(this.previousPosition, this.pos, alpha);
+  }
+
+  sampleActionFrame(alpha) {
+    return this.previousAction === this.actionSequence
+      ? THREE.MathUtils.lerp(this.previousFrame, this.frame, alpha) : this.frame;
+  }
+
+  syncMesh(alpha = 1) {
+    this.samplePosition(alpha, this.mesh.group.position);
+    const yaw = this.previousAction === this.actionSequence ? lerpYaw(this.previousYaw, this.yaw, alpha) : this.yaw;
+    this.mesh.group.rotation.set(0, yaw, 0, 'YXZ');
     // 受击闪白（闪红会让蓝色角色变紫，读不出「刚被打中」）
     const f = this.flashTimer > 0 ? 1 : 0;
     this.mesh.matBody.emissive?.setHex?.(f ? 0xffffff : 0x000000);
@@ -657,12 +717,16 @@ class Actor {
     this.yaw = yaw;
     this.hp = this.maxHp;
     this.poise = this.maxPoise;
+    this.poiseRegenAt = 0;
+    this.poiseRecoverySlowed = false;
+    this.counterUntil = 0;
     this.setState('idle');
     this.moving = false;
     this.speed = 0;
     this.stunTimer = 0;
     this.iframe = 0;
     this.flashTimer = 0;
+    this.rememberVisualFrame();
   }
 }
 
@@ -684,7 +748,7 @@ if (location.search.includes('debug')) {
 }
 const boss = new Actor({
   name: 'BOSS', isBoss: true, scale: 2.6, pos: [0, -8],
-  hp: 3200, poise: 120, hurt: { radius: 1.15, height: 4.6 },
+  hp: 12800, poise: 600, hurt: { radius: 1.15, height: 4.6 },
 });
 if (location.search.includes('debug')) window.__boss = boss;   // Boss（动作 / AI 排查用）
 
@@ -718,6 +782,13 @@ function activeHitbox(actor) {
   const m = actor.move;
   const strike = activeStrike(m, actor.frame);
   if (!strike) return null;
+  if (m.meteor) {
+    if (!meteorSmash?.target || meteorSmash.ownerAction !== actor.actionSequence || actor.frame !== m.startup) return null;
+    return {
+      strike, center: meteorSmash.target, radius: METEOR.radius - player.hurt.radius * player.scale,
+      yMin: 0, yMax: m.hitbox.yMax,
+    };
+  }
   const f = actor.forward;
   const center = actor.pos.clone().addScaledVector(f, m.hitbox.offset * actor.scale);
   return {
@@ -729,23 +800,98 @@ function activeHitbox(actor) {
   };
 }
 
+const PERFECT_DODGE_FRAMES = 10;
+const PERFECT_DODGE_SLOW_SECONDS = .44;
+const ULTIMATE_MAX = 100;
+const ULTIMATE_PARRY_GAIN = 25;
+const ULTIMATE_DODGE_GAIN = 20;
+const GUARD_HOLD_COST = .30;
+const BOSS_GUARD_HOLD_COST = .18;
+const PARRY_WINDOW = 8;
+const DODGE_POISE_RETURN = 12;
+const PARRY_POISE_RETURN = 10;
+const LIGHT_POISE_RETURN = 8;
+const PARRY_POISE_DAMAGE = 26;
+const COUNTER_WINDOW = 72;
+const COUNTER_POISE_MULTIPLIER = 1.5;
+const DEFENSE_REGEN_DELAY = 42;
+const DEFENSE_REGEN_RATE = .53;
+const HIT_POISE_REGEN_DELAY = 90;
+const HIT_POISE_REGEN_RATE = .24;
+let ultimateCast = null, releasedUltimate = null, playerUltimateMotion = null;
+let meteorSmash = null;
+const ultimateDelta = new THREE.Vector3();
+const waveStartProbe = new THREE.Vector3(), waveEndProbe = new THREE.Vector3();
+const waveSweep = new THREE.Line3(waveStartProbe, waveEndProbe);
+const ultimateTarget = new THREE.Vector3();
+const POISE_BREAK_FRAMES = { player: 44, boss: 96 };
+const rollSweep = new THREE.Line3();
+const dodgeProbe = new THREE.Vector3();
+const dodgeGrabOffset = new THREE.Vector3();
+let perfectDodgeFrame = null;
+let dodgeSlowTime = 0;
+let dodgeVisualAlpha = 1;
+
+function dodgeProgress() {
+  return PERFECT_DODGE_SLOW_SECONDS - dodgeSlowTime;
+}
+
+function dodgeTimeScale() {
+  const elapsed = dodgeProgress();
+  const { smoothstep } = THREE.MathUtils;
+  const strength = smoothstep(elapsed, 0, .037) * (1 - smoothstep(elapsed, .175, PERFECT_DODGE_SLOW_SECONDS));
+  return 1 - .64 * strength;
+}
+
+function dodgePoseAlpha() {
+  if (dodgeSlowTime <= 0 || grabSequence || hitstopFrames > 0) return 1;
+  const { clamp, lerp, smoothstep } = THREE.MathUtils;
+  const elapsed = dodgeProgress();
+  const blend = smoothstep(elapsed, 0, .042) * (1 - smoothstep(elapsed, .318, PERFECT_DODGE_SLOW_SECONDS));
+  return lerp(1, clamp(acc / STEP, 0, 1), blend);
+}
+let ultimateEnergy = 0;
+
+function addUltimateEnergy(amount) {
+  ultimateEnergy = Math.min(ULTIMATE_MAX, ultimateEnergy + amount);
+}
+
+function confirmPerfectDodge() {
+  perfectDodgeFrame = player.frame;
+  dodgeSlowTime = PERFECT_DODGE_SLOW_SECONDS;
+  addUltimateEnergy(ULTIMATE_DODGE_GAIN);
+  restorePlayerPoise(DODGE_POISE_RETURN, .94);
+  player.counterUntil = logicFrame + COUNTER_WINDOW;
+  if (VFX_CFG.enabled) dodgeEffect.trigger(rollSweep.start, player.forward);
+  banner('完美闪避', 690, 'dodge');
+}
+
 function resolveHit(attacker, defender, hb) {
   if (!hb || attacker.state === 'dead' || defender.state === 'dead') return;
   if (defender === player && grabSequence) return;
   const hitKey = hb.strike.index + ':' + defender.name;
   if (attacker.hitSet.has(hitKey)) return;
-  if (defender.iframe > 0) return;
+  const perfectWindow = defender === player && player.state === 'roll' &&
+    player.iframe > 0 && perfectDodgeFrame === null && player.frame < PERFECT_DODGE_FRAMES;
+  if (defender.iframe > 0 && !perfectWindow) return;
 
-  const hurtY1 = defender.hurt.height * defender.scale;
+  const hurtY = defender.pos.y;
+  const hurtY1 = hurtY + defender.hurt.height * defender.scale;
   const hurtR = defender.hurt.radius * defender.scale;
+  // The player may cross the rim of the attack volume in the same frame.
+  const target = perfectWindow && rollSweep.distanceSq() > 1e-8
+    ? rollSweep.closestPointToPoint(hb.center, true, dodgeProbe)
+    : defender.pos;
+  if (!cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax, target, hurtR, hurtY, hurtY1)) return;
 
-  if (!cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax,
-    defender.pos, hurtR, 0, hurtY1)) return;
-
-  if (attacker === boss && attacker.move.grab) {
-    // 扩大横向抓取范围以后，Boss 身后的玩家仍然不在抓取范围内。
-    const toPlayer = defender.pos.clone().sub(attacker.pos);
-    if (attacker.forward.dot(toPlayer) <= 0) return;
+  const grab = attacker === boss && attacker.move.grab;
+  if (grab && attacker.forward.dot(dodgeGrabOffset.copy(target).sub(attacker.pos)) <= 0) return;
+  if (perfectWindow) {
+    attacker.hitSet.add(hitKey);
+    confirmPerfectDodge();
+    return;
+  }
+  if (grab) {
     attacker.hitSet.add(hitKey);
     capturePlayer();
     return;
@@ -811,80 +957,126 @@ function finishDeath(actor, frame = 0) {
   banner(actor === player ? '你死了' : '击败首领', 2200, actor === player ? 'defeat' : 'victory');
 }
 
+function restorePlayerPoise(amount, limit = 1) {
+  const restored = Math.min(amount, Math.max(0, player.maxPoise * limit - player.poise));
+  player.poise += restored;
+  if (player.poise >= player.maxPoise) player.poiseRecoverySlowed = false;
+}
+
+function regeneratePlayerPoise() {
+  const canRecover = ['idle', 'move', 'roll', 'light1', 'light2', 'light3', 'light4'].includes(player.state);
+  if (canRecover && logicFrame >= player.poiseRegenAt) {
+    restorePlayerPoise(player.poiseRecoverySlowed ? HIT_POISE_REGEN_RATE : DEFENSE_REGEN_RATE);
+  }
+}
+
+function damagePoise(actor, amount, minimumStun = 0, fromHit = false) {
+  if (actor.state === 'guardbreak' || actor.state === 'dead') return false;
+  const loss = THREE.MathUtils.clamp(amount, 0, actor.poise);
+  actor.poise -= loss;
+  if (actor === player && loss > 0) {
+    const delay = fromHit ? HIT_POISE_REGEN_DELAY : DEFENSE_REGEN_DELAY;
+    actor.poiseRegenAt = Math.max(actor.poiseRegenAt, logicFrame + delay);
+    if (fromHit) actor.poiseRecoverySlowed = true;
+  }
+  if (actor.poise > 0 || actor.hp <= 0) return false;
+
+  const duration = actor.isBoss ? POISE_BREAK_FRAMES.boss : POISE_BREAK_FRAMES.player;
+  actor.setState('guardbreak');
+  actor.stunTimer = Math.max(duration, minimumStun);
+  actor.moving = false;
+  actor.speed = 0;
+  if (actor === player) {
+    actor.counterUntil = 0;
+    clearBufferedInput();
+  }
+  banner(actor.isBoss ? '首领破势' : '架势崩溃', 680);
+  return true;
+}
+
+function stepPoiseBreak(actor) {
+  const frames = ++actor.frame;
+  const refill = actor.maxPoise * (actor.isBoss ? 1 : .55);
+  if (frames < actor.stunTimer) {
+    if (!actor.isBoss) actor.poise = Math.max(actor.poise, refill * frames / actor.stunTimer);
+    return;
+  }
+  actor.poise = refill;
+  if (!actor.isBoss) actor.poiseRegenAt = Math.max(actor.poiseRegenAt, logicFrame);
+  actor.stunTimer = 0;
+  actor.setState('idle');
+}
+
 function applyDamage(attacker, defender, move) {
-  // 玩家格挡 / 弹反窗口
   if (defender === player && player.state === 'block') {
-    const parryEnd = 8;
-    if (player.frame <= parryEnd) {
-      // 弹反中断当前招式，并给玩家固定的反击窗口。
-      boss.poise = Math.max(0, boss.poise - 60);
-      boss.setState('parried');
-      boss.stunTimer = 90;
-      boss.moving = false;
+    if (player.frame <= PARRY_WINDOW) {
+      if (!damagePoise(boss, PARRY_POISE_DAMAGE)) {
+        boss.setState('parried');
+        boss.stunTimer = 32;
+        boss.moving = false;
+        banner('弹反 · 反击窗口', 650);
+      }
+      addUltimateEnergy(ULTIMATE_PARRY_GAIN);
+      restorePlayerPoise(PARRY_POISE_RETURN, .94);
+      player.counterUntil = logicFrame + COUNTER_WINDOW;
       player.iframe = 20;
       shake(0.14);
       hitstop(HITSTOP_HEAVY());
-      vfx.parry(player, attacker);
-      banner('弹反', 500);
+      vfx.parry(player, attacker, guardContact(player, attacker));
       return;
     }
-    // 普通格挡：减伤 80%，削减韧性
-    defender.hp = Math.max(0, defender.hp - move.damage * 0.2);
-    defender.poise -= move.damage * 0.14;
-    if (defender.hp > 0) {
-      const broken = defender.poise <= 0;
-      defender.setState(broken ? 'guardbreak' : 'hitstun');
-      defender.stunTimer = broken ? 60 : 14;
-      if (broken) defender.poise = defender.maxPoise * 0.5;
-    }
+
+    const pressure = move.poise * 1.45;
+    const spill = Math.max(0, pressure - player.poise);
+    if (spill > 0) defender.hp = Math.max(0, defender.hp - move.damage * .42 * spill / pressure);
+    damagePoise(defender, pressure, 0, true);
     shake(0.05);
     hitstop(HITSTOP_LIGHT());
-    vfx.guard(player, attacker);
+    vfx.guard(player, attacker, guardContact(player, attacker));
     flash(defender);
     finishDeath(defender);
     return;
   }
 
-  // Boss 架招：减伤 70%，不吃硬直，只掉韧性；韧性打空照样破防
-  if (defender === boss && boss.state === 'block') {
-    defender.hp = Math.max(0, defender.hp - move.damage * 0.30);
-    defender.poise = Math.max(0, defender.poise - move.damage * 0.22);
+  const counter = attacker === player && defender === boss && logicFrame < player.counterUntil;
+  if (counter) player.counterUntil = 0;
+  if (defender === boss && boss.state === 'block' && !counter) {
+    defender.hp = Math.max(0, defender.hp - move.damage * .30);
+    damagePoise(defender, move.poise * .80);
     defender.flashTimer = 3;
     shake(0.05);
     hitstop(HITSTOP_LIGHT());
-    vfx.guard(boss, attacker);
-    if (defender.hp > 0 && defender.poise <= 0) {
-      defender.setState('hitstun');
-      defender.stunTimer = 40;
-      defender.poise = defender.maxPoise * 0.5;
-    }
+    vfx.guard(boss, attacker, guardContact(boss, attacker));
     finishDeath(defender);
     return;
   }
 
-  const dmg = move.damage;
+  const vulnerable = defender.state === 'guardbreak';
+  const dmg = move.damage * (vulnerable ? (defender.isBoss ? 1.4 : 1.25) : 1);
   defender.hp = Math.max(0, defender.hp - dmg);
-  defender.poise = Math.max(0, defender.poise - move.poise);
+  const existingStun = ['parried', 'ultimateStun'].includes(defender.state) ? defender.stunTimer - defender.frame : 0;
+  const shattered = damagePoise(defender, move.poise * (counter ? COUNTER_POISE_MULTIPLIER : 1),
+    existingStun, defender === player && dmg > 0);
+  if (attacker === player && defender === boss && attacker.state.startsWith('light') && dmg > 0) {
+    restorePlayerPoise(LIGHT_POISE_RETURN);
+  }
+  if (defender === player && dmg > 0) player.counterUntil = 0;
+  if (counter && !shattered) banner('反击削韧', 480);
   // Boss 霸体判定：
   //   · 超霸体生效中 → 不产生受击僵直
   //   · 正在出招     → 整段攻击都是霸体，不会被打断
   // 两种情况血量都照扣。
   // 反击照常结算伤害和削韧，保留正在进行的弹反硬直。
-  const bossParried = defender === boss && boss.state === 'parried';
-  const bossImmune = defender === boss && (bossParried || registerBossStun());
+  const bossParried = defender === boss && (defender.state === 'parried' || defender.state === 'ultimateStun');
+  const poiseBroken = defender.state === 'guardbreak';
+  const bossImmune = defender === boss && (bossParried || poiseBroken || registerBossStun());
   const bossAttacking = defender === boss && boss.state === 'attack';
-  const canStagger = !bossImmune && !bossAttacking;
+  const canStagger = !poiseBroken && !bossImmune && !bossAttacking;
   if (defender.hp > 0 && canStagger) {
     defender.setState('hitstun');
     defender.stunTimer = move.hitstun;
   }
   defender.flashTimer = 4;
-
-  // 削韧满：强制长硬直
-  if (defender.poise <= 0 && defender === boss) {
-    if (canStagger) defender.stunTimer = 110;
-    defender.poise = defender.maxPoise;
-  }
 
   // Boss 挨打记账：越打越凶。复仇窗口内间隔缩短、只进攻、优先快招。
   if (defender === boss) {
@@ -914,6 +1106,125 @@ function screenBasis() {
   return { fwd, right: new THREE.Vector3(-fwd.z, 0, fwd.x) };
 }
 
+function tryUltimate() {
+  if (boss.state === 'dead' || !consume('ultimate', 15)) return false;
+  if (ultimateEnergy < ULTIMATE_MAX) return false;
+
+  ultimateEnergy = 0;
+  ultimateCast = createUltimateCast(player, boss, camYaw, camPitch, playerUltimateMotion);
+  player.yaw = Math.atan2(ultimateCast.forward.x, ultimateCast.forward.z);
+  player.setState('ultimate');
+  player.moving = false;
+  player.speed = 0;
+  clearBufferedInput();
+  banner('银弧连斩', 920, 'ultimate');
+  return true;
+}
+
+function strikeUltimate(cast, cut) {
+  const finisher = cut === FINISHER;
+  cast.hits++;
+  boss.hp = Math.max(0, boss.hp - cut.damage * (boss.state === 'guardbreak' ? 1.4 : 1));
+  if (boss.hp > 0) {
+    const hold = finisher ? 58 : ULTIMATE_STAGGER;
+    damagePoise(boss, finisher ? 25 : cut.poise ?? 10, hold);
+    if (boss.state === 'guardbreak') boss.stunTimer = Math.max(boss.stunTimer, boss.frame + hold);
+    else {
+      boss.setState('ultimateStun');
+      boss.stunTimer = hold;
+    }
+    boss.moving = false;
+    boss.speed = 0;
+  }
+  flash(boss);
+  shake(finisher ? .18 : .043);
+  hitstop(finisher ? 4 : 1);
+  finishDeath(boss);
+}
+
+function resolveUltimateCuts(cast) {
+  const frame = player.frame;
+  if (frame === FINISHER.hit && !cast.wave) {
+    startFinisher(cast, player.pos);
+    cast.wave.firedAt = logicFrame;
+    releasedUltimate = cast;
+  }
+  if (boss.state === 'dead' || boss.iframe > 0 || boss.pos.y > 1.30) return;
+  const cut = ULTIMATE_CUTS.find(cut => cut.hit === frame && cut !== FINISHER)
+    ?? ULTIMATE_KICKS.find(kick => kick.hit === frame);
+  if (!cut) return;
+  const delta = ultimateTarget.copy(boss.pos).sub(player.pos).setY(0);
+  const reach = cut.reach + Math.min(.60, boss.hurt.radius * boss.scale * .28);
+  if (delta.lengthSq() <= reach ** 2 && delta.dot(cast.forward) >= -.62) strikeUltimate(cast, cut);
+}
+
+function resolveUltimateWave() {
+  const cast = releasedUltimate;
+  if (!cast) return;
+  const wave = cast.wave;
+  const age = logicFrame - wave.firedAt;
+  if (age > FINISHER.duration + 10) {
+    if (cast.hits === 0 && player.state !== 'dead' && (!ultimateCast || ultimateCast === cast)) {
+      banner('大招落空', 600, 'ultimate');
+    }
+    releasedUltimate = null;
+    if (!ultimateCast) ultimateEffect.clear();
+    return;
+  }
+  if (wave.struck || age > FINISHER.duration || boss.state === 'dead' || boss.iframe > 0 || boss.pos.y > 1.30) return;
+  const frame = FINISHER.hit + age;
+  waveStartProbe.copy(wave.origin).addScaledVector(wave.direction, finisherRun(frame - 1) - .8);
+  waveEndProbe.copy(wave.origin).addScaledVector(wave.direction, finisherRun(frame) + 1.05);
+  const reach = 1.92 + Math.min(.60, boss.hurt.radius * boss.scale * .28);
+  if (waveSweep.closestPointToPoint(ultimateTarget.copy(boss.pos).setY(0), true, ultimateDelta)
+    .distanceToSquared(ultimateTarget) <= reach ** 2) {
+    wave.struck = true;
+    strikeUltimate(cast, FINISHER);
+  }
+}
+
+function endUltimate(cast) {
+  returnUltimateCamera(cast);
+  ultimateCast = null;
+  if (!releasedUltimate) ultimateEffect.clear();
+}
+
+function advanceUltimate() {
+  const cast = ultimateCast;
+  if (cast) {
+    cast.previous = player.frame++;
+    if (player.frame < ULTIMATE_END) {
+      const buffered = name => logicFrame - (pressedAt[name] ?? -Infinity) <= BUFFER_WINDOW;
+      const canCancel = player.frame >= ULTIMATE_CANCEL_FROM &&
+        (['fwd', 'back', 'left', 'right'].some(down) || buffered('roll') || buffered('light') ||
+          (player.poise > 0 && (down('block') || buffered('block'))) ||
+          (player.poise > MOVES.p_heavy.stamina && buffered('heavy')));
+      if (!canCancel) {
+        player.pos.add(ultimateStep(cast, player.frame, ultimateDelta));
+        player.clampToArena();
+        return true;
+      }
+    }
+    endUltimate(cast);
+    if (cast.hits === 0 && !releasedUltimate) banner('大招落空', 600, 'ultimate');
+  }
+  player.setState('idle');
+  return false;
+}
+
+function startPlayerAttack(state, id) {
+  const cost = state.startsWith('heavy') ? MOVES[id].stamina : 0;
+  if (cost > 0) {
+    if (player.poise <= cost) {
+      banner('韧性不足', 560);
+      return false;
+    }
+    damagePoise(player, cost);
+  }
+  player.setState(state, id);
+  return true;
+}
+
 function playerTick() {
   if (player.flashTimer > 0) player.flashTimer--;
   if (player.state === 'dead') { player.frame++; return; }
@@ -927,10 +1238,14 @@ function playerTick() {
     player.turnToward(Math.atan2(d.x, d.z), 16);
   }
 
+  if (player.state === 'ultimate' && advanceUltimate()) return;
+
   switch (player.state) {
 
-    case 'hitstun':
     case 'guardbreak':
+      stepPoiseBreak(player);
+      return;
+    case 'hitstun':
       player.frame++;
       if (player.frame >= player.stunTimer) player.setState('idle');
       return;
@@ -938,11 +1253,12 @@ function playerTick() {
 
     case 'roll': {
       player.frame++;
-      // 翻滚位移：前 20 帧走完 4.6m（用抛物线速度曲线）
-      const t = Math.min(1, player.frame / 20);
+      // Save this tick's path so an early roll can dodge a hit it just crossed.
+      rollSweep.start.copy(player.pos);
       const prev = rollDist(player.frame - 1);
       const cur = rollDist(player.frame);
       player.translate(cur - prev);
+      rollSweep.end.copy(player.pos);
       if (player.frame >= CFG.rollTotal) player.setState('idle');
       return;
     }
@@ -975,10 +1291,7 @@ function playerTick() {
         // 窗口必须盖住整段招式的取消延迟。light1 的判定到 38 帧结束、
         // cancelFrom=3，也就是第 41 帧才开放连段 —— 窗口给小了，玩家在起手段
         // 按的键到那一刻已经过期，只能眼睁睁看着第一段打完再重来。
-        if (link && consume(link[2], 55)) {
-          player.setState(link[0], link[1]);
-          return;
-        }
+        if (link && consume(link[2], 55) && startPlayerAttack(link[0], link[1])) return;
         if (consume('roll', 10)) { startRoll(); return; }
       }
       if (player.frame >= totalFrames(m)) player.setState('idle');
@@ -991,25 +1304,40 @@ function playerTick() {
       applyMoveInput(0.42);
       if (player.state !== 'block') return;   // 移动里没改状态，保险
 
-      // 松开格挡给 4 帧余量，避免抖动误松
-      if (!down('block') && player.frame > 4) { player.setState('idle'); return; }
+      if (!down('block') && player.frame > PARRY_WINDOW) {
+        player.setState('idle');
+        return;
+      }
+
+      // A timed tap has no cost. Holding past the parry window consumes stance.
+      if (player.frame > PARRY_WINDOW && damagePoise(player, GUARD_HOLD_COST)) return;
 
       // 格挡中可取消进翻滚 / 出轻击
+      if (tryUltimate()) return;
       if (player.frame > 6 && consume('roll', 6)) { startRoll(); return; }
-      if (player.frame > 8 && consume('light', 6)) { player.setState('light1', 'p_light1'); return; }
+      if (player.frame > PARRY_WINDOW && consume('light', 6)) { startPlayerAttack('light1', 'p_light1'); return; }
+      if (player.frame > PARRY_WINDOW && consume('heavy', 6)) startPlayerAttack('heavy', 'p_heavy');
       return;
     }
 
     default: {
       // idle / move：接受一切输入
       // 顺序很重要：格挡判定放在移动之后，这样按住 L 的同时还能移动
+      if (tryUltimate()) return;
       if (consume('roll')) { startRoll(); return; }
-      if (consume('light')) { player.setState('light1', 'p_light1'); return; }
-      if (consume('heavy')) { player.setState('heavy', 'p_heavy'); return; }
+      if (consume('light')) { startPlayerAttack('light1', 'p_light1'); return; }
+      if (consume('heavy') && startPlayerAttack('heavy', 'p_heavy')) return;
 
       // 按住 S 只转一次：必须松开 S 才能再次触发（防止连点/长按导致连续翻身）
       const moved = applyMoveInput(1.0);
-      if (down('block')) { player.setState('block'); return; }
+      const freshGuard = consume('block');
+      if (down('block') || freshGuard) {
+        if (player.poise > 0) {
+          player.setState('block');
+          return;
+        }
+        if (freshGuard) banner('韧性不足', 560);
+      }
 
       if (moved) {
         if (player.state === 'idle') player.setState('move');
@@ -1074,7 +1402,9 @@ function applyMoveInput(speedScale = 1) {
 function rollDist(frame) {
   if (frame <= 0) return 0;
   const t = Math.min(1, frame / 32);
-  return CFG.rollDistance * (1 - Math.pow(1 - t, 2.2));
+  const step = perfectDodgeFrame === null ? 0
+    : .52 * THREE.MathUtils.smoothstep(frame, perfectDodgeFrame, perfectDodgeFrame + 6);
+  return CFG.rollDistance * (1 - Math.pow(1 - t, 2.2)) + step;
 }
 
 function startRoll() {
@@ -1089,7 +1419,9 @@ function startRoll() {
     player.yaw = Math.atan2(dir.x, dir.z);
   }
   player.setState('roll');
-  player.iframe = CFG.playerIframe;
+  perfectDodgeFrame = null;
+  rollSweep.start.copy(player.pos);
+  rollSweep.end.copy(player.pos);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1134,6 +1466,7 @@ const BOSS_ATTACK_RULES = {
   b_slam: { preferredRange: [0, 3.95], punishFrames: 30 },
   b_heavy_combo: { preferredRange: [3.2, 4.35], punishFrames: 36 },
   b_grab: { preferredRange: [4.7, 6.9], punishFrames: 36 },
+  b_meteor: { preferredRange: [5.4, 12.0], punishFrames: 42 },
 };
 
 function playerWallRadius() {
@@ -1294,7 +1627,7 @@ function tryBossDefense(toPlayer) {
   }
   const attack = AI.playerAttack;
   if (attack.checked) return false;
-  const canBlock = logicFrame >= AI.nextBlock && CFG.bossBlockChance > 0
+  const canBlock = boss.poise >= 14 && logicFrame >= AI.nextBlock && CFG.bossBlockChance > 0
     && boss.forward.dot(toPlayer) > 0;
   const canDodge = logicFrame >= AI.nextDodge && CFG.bossDodgeChance > 0;
   if ((!canBlock && !canDodge) || !playerAttackThreatensBoss(move)) {
@@ -1456,9 +1789,21 @@ function pickBossMove(dist) {
   return pool[pool.length - 1].id;
 }
 
+function tickBossMeteor(move, targetYaw) {
+  if (meteorSmash?.ownerAction !== boss.actionSequence) meteorSmash = newMeteorSmash(boss);
+  const prior = meteorSmash.frame;
+  const frame = meteorFrame(move, ++boss.frame);
+  updateMeteorSmash(meteorSmash, boss, player, frame,
+    () => boss.turnToward(targetYaw, CFG.bossTurnFrames), () => banner('熔岩跃砸', 640, 'notice'));
+  if (prior < METEOR.launch && frame >= METEOR.launch) {
+    impactImpulse = Math.max(impactImpulse, .125);
+  }
+  if (boss.frame >= totalFrames(move)) finishBossAttack(BOSS_ATTACK_RULES.b_meteor.punishFrames);
+}
+
 function bossTick() {
   if (boss.flashTimer > 0) boss.flashTimer--;
-  if (boss.stunTimer > 0 && boss.state !== 'parried') boss.stunTimer--;
+  if (boss.stunTimer > 0 && boss.state === 'hitstun') boss.stunTimer--;
   if (boss.state === 'dead') { boss.frame++; return; }
   if (player.state === 'dead') return;
 
@@ -1492,12 +1837,18 @@ function bossTick() {
       // 架招：面向玩家站定，时间到解除
       boss.turnToward(targetYaw, CFG.bossTurnFrames);
       boss.frame++;
+      if (damagePoise(boss, BOSS_GUARD_HOLD_COST)) return;
       if (logicFrame >= (AI.blockUntil ?? 0)) {
         boss.setState('idle');
         AI.gapFrames = Math.max(AI.gapFrames, 8);
       }
       return;
 
+    case 'guardbreak':
+      stepPoiseBreak(boss);
+      return;
+
+    case 'ultimateStun':
     case 'parried':
       if (++boss.frame >= boss.stunTimer) {
         boss.stunTimer = 0;
@@ -1520,6 +1871,7 @@ function bossTick() {
     default: {
       const move = boss.move;
       if (move?.grab) { tickBossGrab(move); return; }
+      if (move?.meteor) { tickBossMeteor(move, targetYaw); return; }
       if (move) {
         if (bossCanTrackDuringAttack(move, boss.frame)) boss.turnToward(targetYaw, CFG.bossTurnFrames);
 
@@ -1642,13 +1994,14 @@ let lastTime = performance.now();
 let logicFrame = 0;
 let hitstopFrames = 0;
 let shakeAmt = 0;
+let impactImpulse = 0;
 
 function hitstop(f) { hitstopFrames = Math.max(hitstopFrames, f); }
 function shake(v) { shakeAmt = Math.min(0.3, shakeAmt + v); }
 
 /** 出招第一帧挂预警；之后特效自己读 actor.frame，判定帧一到自动淡出 */
 function syncTelegraph(a, previousFrame) {
-  if (!a.move || a.move.active <= 0) return;
+  if (!a.move || a.move.meteor || a.move.active <= 0) return;
   if (previousFrame >= 1 || a.frame < 1) return;
   if (VFX_CFG.telegraphBossOnly && !a.isBoss) return;
   vfx.telegraph(a, a.move);
@@ -1656,7 +2009,7 @@ function syncTelegraph(a, previousFrame) {
 
 /** 判定窗口的第一帧放刀光（不是起手帧） */
 function spawnSwingVFX(a, hitbox, previousFrame) {
-  if (a.move?.grab || !hitbox || previousFrame >= hitbox.strike.startup) return;
+  if (a.move?.grab || a.move?.meteor || !hitbox || previousFrame >= hitbox.strike.startup) return;
   const swing = { ...a.move, ...hitbox.strike };
   vfx.swingFromActor(a, swing);
   // free_slash_vfx 的新月贴图：只给 Boss 加一层（玩家已有紫色剑轨）
@@ -1704,6 +2057,42 @@ function bladeSpan(group) {
   return span;
 }
 
+function sampleWeaponBlade(group, base, tip) {
+  const span = bladeSpan(group);
+  if (!Number.isFinite(span.lo) || !Number.isFinite(span.hi) || span.hi - span.lo < .001) return false;
+  group.updateWorldMatrix(true, false);
+  base.set(0, 0, 0);
+  tip.set(0, 0, 0);
+  base[span.axis] = span.lo;
+  tip[span.axis] = span.hi;
+  base.applyMatrix4(group.matrixWorld);
+  tip.applyMatrix4(group.matrixWorld);
+  return true;
+}
+
+function guardContact(defender, attacker) {
+  const blade = new THREE.Line3();
+  if (!defender.binder?.weaponGroup ||
+      !sampleWeaponBlade(defender.binder.weaponGroup, blade.start, blade.end)) return null;
+
+  // Prefer the overlap of the visible blades. Combat uses larger hit volumes,
+  // so a successful block can also need a contact point on the defender's blade alone.
+  const aim = attacker.pos.clone().sub(defender.pos).setY(0).normalize();
+  const scale = defender.scale;
+  aim.multiplyScalar(.72 * scale).add(defender.pos).y += 1.18 * scale;
+  const point = blade.closestPointToPoint(aim, true, new THREE.Vector3());
+  const incoming = new THREE.Line3();
+  if (attacker.binder?.weaponGroup &&
+      sampleWeaponBlade(attacker.binder.weaponGroup, incoming.start, incoming.end)) {
+    const other = incoming.closestPointToPoint(point, true, new THREE.Vector3());
+    const near = blade.closestPointToPoint(other, true, new THREE.Vector3());
+    if (near.distanceToSquared(other) < (.45 * scale) ** 2 &&
+        near.distanceToSquared(aim) < (.65 * scale) ** 2) point.copy(near).lerp(other, .30);
+  }
+  if (point.distanceToSquared(aim) > (.95 * scale) ** 2 || point.y < defender.pos.y + .42 * scale) return null;
+  return { point, axis: blade.delta(new THREE.Vector3()).normalize() };
+}
+
 /**
  * 每帧调用。只要角色处于出招状态就持续采样，
  * 挥得快 → 同一时间窗内扫过的路径更长；停下 → 旧采样自然淡出。
@@ -1713,15 +2102,10 @@ function feedBladeTrail(key, a, dt, swinging = !!a && !a.move?.grab && ATTACK_ST
   const group = a && a.binder && a.binder.weaponGroup;
   if (!swinging || !group) { vfx.feedTrail(key, null, null, dt, false); return; }
 
-  // 用实测的剑身跨度取两端（不再假设本地 +Y 就是刃向）
-  const span = bladeSpan(group);
-  group.updateWorldMatrix(true, false);
-  _trailBase.set(0, 0, 0);
-  _trailTip.set(0, 0, 0);
-  _trailBase[span.axis] = span.lo;
-  _trailTip[span.axis] = span.hi;
-  _trailBase.applyMatrix4(group.matrixWorld);
-  _trailTip.applyMatrix4(group.matrixWorld);
+  if (!sampleWeaponBlade(group, _trailBase, _trailTip)) {
+    vfx.feedTrail(key, null, null, dt, false);
+    return;
+  }
 
   // 沿刃身「平行下移」一段：让光带正好压住整条剑身（负值 = 往护手方向挪）
   const shift = VFX_CFG.trailShift ?? 0;
@@ -1735,6 +2119,8 @@ function feedBladeTrail(key, a, dt, swinging = !!a && !a.move?.grab && ATTACK_ST
 
 function tick() {
   if (CFG.paused) return;
+  player.rememberVisualFrame();
+  boss.rememberVisualFrame();
   if (hitstopFrames > 0) { hitstopFrames--; shakeAmt *= 0.75; return; }
 
   logicFrame++;
@@ -1745,9 +2131,22 @@ function tick() {
   bossTick();
   advanceGrab();
 
-  // 判定：双向
+  // Resolve the cut before the enemy's strike. A landed cut cancels that attack.
+  if (player.state === 'ultimate' && ultimateCast) resolveUltimateCuts(ultimateCast);
+  resolveUltimateWave();
   resolveHit(player, boss, activeHitbox(player));
-  resolveHit(boss, player, activeHitbox(boss));
+  const bossHit = activeHitbox(boss);
+  if (bossHit && boss.move.meteor) {
+    impactImpulse = Math.max(impactImpulse, .64);
+    bossSmashEffect.impact(bossHit.center, VFX_CFG.enabled ? VFX_CFG.intensity : 0);
+    hitstop(4);
+  }
+  resolveHit(boss, player, bossHit);
+  if (meteorSmash && (boss.actionSequence !== meteorSmash.ownerAction || player.state === 'dead')) {
+    boss.pos.y = 0;
+    meteorSmash = null;
+  }
+  if (ultimateCast && player.state !== 'ultimate') endUltimate(ultimateCast);
 
   // 起手预警：出招第一帧挂上，判定帧前最亮（类魂的「读招」全靠它）
   syncTelegraph(player, previousPlayerFrame);
@@ -1762,7 +2161,8 @@ function tick() {
   // 玩家就会被「推着走」—— 玩家自己走一步，Boss 挤回来半步，净位移全由 Boss 决定。
   const bossDashingToGrab = boss.move?.grab && boss.frame >= boss.move.startup
     && boss.frame < boss.move.startup + boss.move.active;
-  if (!grabSequence && !bossDashingToGrab && player.state !== 'dead' && boss.state !== 'dead'
+  const meteorLanding = meteorSmash && meteorSmash.frame >= METEOR.launch && meteorSmash.frame < METEOR.impact + 12;
+  if (!grabSequence && !bossDashingToGrab && !meteorLanding && player.state !== 'dead' && boss.state !== 'dead'
     && player.state !== 'roll' && player.iframe <= 0) {
     const dx = player.pos.x - boss.pos.x;
     const dz = player.pos.z - boss.pos.z;
@@ -1794,16 +2194,15 @@ function tick() {
     }
   }
 
-  // 战斗外恢复：待机 / 移动 / 格挡时回复韧性
-  if (player.state === 'idle' || player.state === 'move' || player.state === 'block') {
-    player.poise = Math.min(player.maxPoise, player.poise + 0.6);
-  }
+  regeneratePlayerPoise();
 }
 
 // ── 相机 ──────────────────────────────────────────────────────
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3();
 const focus = new THREE.Vector3();
+const cameraPlayer = new THREE.Vector3();
+const cameraBoss = new THREE.Vector3();
 const framing = { distance: 3.15, clearance: 2.4, pivotHeight: 1.48, lockLift: 0.16, shoulder: 0.32, pitch: 0.075 };
 let camYaw = 0;
 let camPitch = framing.pitch;
@@ -1820,13 +2219,42 @@ function snapCamera() {
   updateCamera(0);
 }
 
-function updateCamera(dtReal) {
-  focus.copy(player.pos);
+function ultimateHomeYaw(cast, actorPosition, targetPosition) {
+  const x = actorPosition.x - targetPosition.x;
+  const z = actorPosition.z - targetPosition.z;
+  return player.lockOn && Math.hypot(x, z) > .01 ? Math.atan2(x, z) : cast.viewYaw;
+}
+
+function returnUltimateCamera(cast) {
+  if (cast.cameraReturned) return;
+  cast.cameraReturned = true;
+  if (grabSequence) return;
+  camYaw = ultimateHomeYaw(cast, player.pos, boss.pos);
+  camPitch = player.lockOn ? Math.min(cast.viewPitch, framing.pitch) : cast.viewPitch;
+}
+
+function updateCamera(dtReal, alpha = 1) {
+  player.samplePosition(alpha, cameraPlayer);
+  boss.samplePosition(alpha, cameraBoss);
+  focus.copy(cameraPlayer);
   const normalFocus = framing.pivotHeight + (player.lockOn ? framing.lockLift : 0);
   const wallFocus = grabSequence?.phase === 'wall'
     ? grabWallCameraFocus(grabSequence) : 0;
-  focus.y += THREE.MathUtils.lerp(normalFocus, 0.65, wallFocus);
-  const follow = 1 - Math.exp(-18 * dtReal);
+  const castFrame = ultimateCast ? ultimateSourceFrame(player.frame) : 0;
+  const returning = ultimateCast && player.frame >= ULTIMATE_CAMERA_RETURN.start;
+  const returnProgress = returning
+    ? THREE.MathUtils.smoothstep(player.frame, ULTIMATE_CAMERA_RETURN.start, ULTIMATE_CAMERA_RETURN.end) : 0;
+  if (returnProgress === 1) returnUltimateCamera(ultimateCast);
+  const cinematic = ultimateCast && !ultimateCast.cameraReturned;
+  const ultimateView = cinematic ? THREE.MathUtils.smoothstep(castFrame, 0, 26) * (1 - returnProgress) : 0;
+  const ultimateWide = THREE.MathUtils.smoothstep(castFrame, 139, 174) * ultimateView;
+  if (ultimateCast) {
+    focus.addScaledVector(ultimateCast.forward, .63 * ultimateView);
+    focus.addScaledVector(ultimateCast.side, -.22 * ultimateView);
+  }
+  const aerialAim = meteorSmash?.airborne ? Math.min(boss.pos.y, 3.8) * .20 : 0;
+  focus.y += THREE.MathUtils.lerp(normalFocus, 0.65, wallFocus) + .31 * ultimateWide + aerialAim;
+  const follow = 1 - Math.exp(-(returning ? 32 : 18) * dtReal);
   if (grabSequence?.phase === 'flight') {
     const direction = grabSequence.direction;
     camYaw = lerpYaw(camYaw, Math.atan2(-direction.x, -direction.z), 1 - Math.exp(-10 * dtReal));
@@ -1836,9 +2264,17 @@ function updateCamera(dtReal) {
     const targetYaw = player.lockOn && Math.hypot(dx, dz) > 0.01 ? Math.atan2(dx, dz) : launchCameraYaw;
     const progress = THREE.MathUtils.smoothstep(age, 7, grabRecoveryFrames(grabSequence) - 1);
     camYaw = lerpYaw(wallCameraYaw, targetYaw, progress);
+  } else if (cinematic) {
+    const angle = Math.atan2(-ultimateCast.forward.x, -ultimateCast.forward.z);
+    const orbit = .98 + .25 * THREE.MathUtils.smoothstep(castFrame, 160, 278);
+    const homeYaw = ultimateHomeYaw(ultimateCast, cameraPlayer, cameraBoss);
+    const home = lerpYaw(ultimateCast.viewYaw, homeYaw, returnProgress);
+    camYaw = lerpYaw(home, angle + orbit, ultimateView);
+    const pitch = player.lockOn ? Math.min(ultimateCast.viewPitch, framing.pitch) : ultimateCast.viewPitch;
+    camPitch = THREE.MathUtils.lerp(pitch, .24 + .050 * ultimateWide, ultimateView);
   } else if (player.lockOn) {
-    const dx = player.pos.x - boss.pos.x;
-    const dz = player.pos.z - boss.pos.z;
+    const dx = cameraPlayer.x - cameraBoss.x;
+    const dz = cameraPlayer.z - cameraBoss.z;
     if (Math.hypot(dx, dz) > 0.01) {
       const delta = Math.atan2(dx, dz) - camYaw;
       camYaw += Math.atan2(Math.sin(delta), Math.cos(delta)) * (1 - Math.exp(-8 * dtReal));
@@ -1853,8 +2289,8 @@ function updateCamera(dtReal) {
   const minBoom = framing.clearance * pitchScale;
   const railRadius = ARENA_R - 1.65;
   const pivotRadius = Math.hypot(pivotX, pivotZ);
-  const turn = 1 - Math.exp(-10 * dtReal);
-  const freeLook = !player.lockOn && !grabSequence;
+  const turn = 1 - Math.exp(-(returning ? 26 : 10) * dtReal);
+  const freeLook = !player.lockOn && !grabSequence && !cinematic;
   const mouseYaw = freeLook ? (railOrbit?.mouseYaw ?? 0) : 0;
   let armYaw = camYaw;
   let railExtend = null;
@@ -1888,7 +2324,8 @@ function updateCamera(dtReal) {
       const target = wanted >= minAngle && wanted <= maxAngle
         ? wanted
         : previous < Math.PI ? minAngle : maxAngle;
-      next += THREE.MathUtils.clamp((target - safeAngle) * turn, -maxStep, maxStep);
+      const autoStep = returning ? 10 * dtReal : maxStep;
+      next += THREE.MathUtils.clamp((target - safeAngle) * turn, -autoStep, autoStep);
     }
     armYaw = radialYaw + next;
     if (railOrbit.manual) {
@@ -1910,7 +2347,7 @@ function updateCamera(dtReal) {
   const toRail = Math.sqrt(Math.max(0, railRadius ** 2 - across ** 2)) - along;
   // 侧移时先维持短镜头臂，等朝向恢复后再伸回肩后距离。
   const extend = railExtend ?? (1 - THREE.MathUtils.smoothstep(Math.abs(yawOffset), 0, 0.45));
-  const desiredBoom = THREE.MathUtils.lerp(minBoom, framing.distance * pitchScale, extend);
+  const desiredBoom = THREE.MathUtils.lerp(minBoom, (framing.distance - .34 * ultimateView + 1.65 * ultimateWide) * pitchScale, extend);
   const boom = THREE.MathUtils.clamp(toRail, 0.1, desiredBoom);
   camPos.set(pivotX + boom * sinYaw, camTarget.y + boom * Math.tan(camPitch), pivotZ + boom * cosYaw);
   camPos.y = Math.max(camPos.y, 0.45);
@@ -1918,10 +2355,10 @@ function updateCamera(dtReal) {
   let aimX = pivotX, aimZ = pivotZ;
   if (railCameraYaw !== null && player.lockOn && !grabSequence) {
     const aimYaw = armYaw + Math.PI;
-    const bossYaw = Math.atan2(boss.pos.x - camPos.x, boss.pos.z - camPos.z);
+    const bossYaw = Math.atan2(cameraBoss.x - camPos.x, cameraBoss.z - camPos.z);
     const delta = lerpYaw(aimYaw, bossYaw, 1) - aimYaw;
     const halfFov = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)) * camera.aspect);
-    const playerYaw = Math.atan2(player.pos.x - camPos.x, player.pos.z - camPos.z);
+    const playerYaw = Math.atan2(cameraPlayer.x - camPos.x, cameraPlayer.z - camPos.z);
     const halfSpan = Math.abs(lerpYaw(bossYaw, playerYaw, 0.5) - bossYaw);
     const margin = THREE.MathUtils.clamp(halfSpan, halfFov * 0.75, halfFov * 0.94);
     // 镜头侧移时适当朝 Boss 转向，给锁定目标留出画面空间。
@@ -1931,23 +2368,24 @@ function updateCamera(dtReal) {
   }
 
   const shakeVec = new THREE.Vector3(
-    (Math.random() - 0.5) * shakeAmt,
-    (Math.random() - 0.5) * shakeAmt,
-    (Math.random() - 0.5) * shakeAmt
+    (Math.random() - 0.5) * (shakeAmt + impactImpulse),
+    (Math.random() - 0.5) * (shakeAmt + impactImpulse),
+    (Math.random() - 0.5) * (shakeAmt + impactImpulse)
   );
   camera.position.copy(camPos).add(shakeVec);
   camera.lookAt(aimX, camTarget.y, aimZ);
   shakeAmt *= 0.86;
+  impactImpulse *= Math.exp(-dtReal * 8.4);
 }
 
 /** 把当前状态翻译成姿态并套到骨架上 */
-function applyActorPose(a, dtReal, getUp = 0) {
+function applyActorPose(a, dtReal, getUp = 0, alpha = 1) {
   if (!a.mesh || !a.mesh.spine) return;
   // 接了真模型时，骨骼动画接管，程序化姿态和脚部 IK 全部让位
   if (a.binder) return;
   const period = a.state === 'move' ? 36 : 90;
   const clock = (logicFrame % period) / period;
-  const pose = poseFor(a, clock, getUp);
+  const pose = poseFor(a, clock, getUp, a.sampleActionFrame(alpha));
 
   // 攻击 / 翻滚 / 受击要精确跟随帧号，待机和跑动给一点平滑
   let blend = 0.85;
@@ -2277,19 +2715,27 @@ function updateDragWeapon(intro) {
 }
 // ── 渲染 ──────────────────────────────────────────────────────
 let lastPoseLogicFrame = 0;
-function render(dtReal) {
+function render(dtReal, dodgeScale) {
   updateStage(performance.now() / 1000, camera);
   // 美术模型动画（灰盒可不接）
-  const animDt = CFG.paused ? 0 : dtReal;   // 暂停时冻结动画，方便逐帧检查
+  const animDt = CFG.paused ? 0 : dtReal * dodgeScale;   // 暂停时冻结动画，方便逐帧检查
   restoreGrabJoints();
-  player.syncMesh();
-  boss.syncMesh();
+  const cast = player.state === 'ultimate' ? ultimateCast : null;
+  const ultimateAlpha = hitstopFrames > 0 || CFG.paused ? 1 : THREE.MathUtils.clamp(acc / STEP,0,1);
+  const castFrame = cast ? THREE.MathUtils.lerp(cast.previous, player.frame, ultimateAlpha) : 0;
+  player.syncMesh(cast?.motion ? ultimateAlpha : dodgeVisualAlpha);
+  boss.syncMesh(meteorSmash ? ultimateAlpha : dodgeVisualAlpha);
   const getUp = grabSequence?.phase === 'wall' ? grabGetUpProgress(grabSequence) : 0;
   if (combatReady) {
     // 擒拿的所有姿态都跟随战斗帧，慢放或命中冻结时和判定保持同步。
     const poseDt = Math.max(0, logicFrame - lastPoseLogicFrame) * STEP;
     if (grabSequence && player.binder) {
       player.binder.update(player, poseDt, grabPlayerAnimation(player, grabSequence, logicFrame));
+    } else if (cast && player.binder) {
+      player.binder.update(player, hitstopFrames > 0 ? 0 : animDt * CFG.timeScale,
+        cast.motion
+          ? { key: 'ultimate', sampleTime: ultimateSourceFrame(castFrame) / 60, fade: .085, groundFeet: true }
+          : ultimateFallbackPose(player.binder, castFrame));
     } else {
       player.binder?.update(player, animDt);
     }
@@ -2297,7 +2743,11 @@ function render(dtReal) {
     const bossAnimDt = hitstopFrames > 0 ? 0 : animDt * CFG.timeScale;
     const kick = boss.move?.grab ? grabBossAnimation(boss) : undefined;
     if (bossIntro) bossIntro.pose(bossAnimDt);
-    else boss.binder?.update(boss, boss.move?.grab ? poseDt : bossAnimDt, kick);
+    else if (meteorSmash) {
+      const frame = meteorFrame(boss.move, boss.sampleActionFrame(ultimateAlpha));
+      boss.binder?.update(boss, bossAnimDt, { key: 'b_meteor', sampleTime: frame / 60, fade: .09, groundFeet: true });
+    } else boss.binder?.update(boss, boss.move?.grab ? poseDt : bossAnimDt,
+      kick ?? { poseFrame: boss.sampleActionFrame(dodgeVisualAlpha) });
   }
 
   // 走路拖刀：世界空间定位，所以不会被走路动画带着上下颠
@@ -2328,20 +2778,41 @@ function render(dtReal) {
   updateGuardViz(player);
 
   // 姿态：由帧表驱动的程序化骨骼动画 + 脚部 IK
-  applyActorPose(player, dtReal, getUp);
-  applyActorPose(boss, dtReal);
+  applyActorPose(player, dtReal, getUp, dodgeVisualAlpha);
+  applyActorPose(boss, dtReal, 0, dodgeVisualAlpha);
   const grabHand = poseBossGrab(boss);
   if (boss.move?.grab) boss.binder?.groundPose(boss, 0);
   poseGrabVictim(player, grabSequence, grabHand);
 
   // 特效推进：顿帧时冻结（打在铁上那一下要「停」住）
-  const dtVfx = CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale;
+  dodgeEffect.update(CFG.paused ? 0 : dtReal, player);
+  const dtVfx = CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale * dodgeScale;
   vfx.update(dtVfx);
+  const intensity = VFX_CFG.enabled ? VFX_CFG.intensity : 0;
+  if (cast || releasedUltimate) {
+    const blade = cast && (player.binder?.weaponGroup ?? (!player.binder ? player.mesh.weapon : null));
+    const sample = blade && sampleWeaponBlade(blade, _trailBase, _trailTip);
+    if (sample && blade.parent) {
+      const grip = blade.userData.weapon?.target;
+      const hand = grip ? blade.parent.localToWorld(_trailDir.copy(grip)) : blade.parent.getWorldPosition(_trailDir);
+      if (_trailTip.distanceToSquared(hand) < _trailBase.distanceToSquared(hand)) {
+        _trailDir.copy(_trailTip);
+        _trailTip.copy(_trailBase);
+        _trailBase.copy(_trailDir);
+      }
+    }
+    const effectsFrame = cast ? castFrame : FINISHER.hit + logicFrame - releasedUltimate.wave.firedAt;
+    ultimateEffect.update(cast ?? releasedUltimate, effectsFrame, dtVfx, intensity, renderer.getPixelRatio(),
+      sample ? _trailBase : null, sample ? _trailTip : null);
+  }
+  bossSmashEffect.update(meteorSmash, meteorSmash ? meteorFrame(boss.move, boss.sampleActionFrame(ultimateAlpha)) : 0,
+    dtVfx, intensity, camera);
 
   // ── 真实剑轨：按「刃根 → 刃尖」逐帧采样，扇形由剑自己扫出来 ──
   feedBladeTrail('player', player, dtVfx);
   feedBladeTrail('boss', boss, dtVfx, bossIntro ? false : undefined);
 
+  vfx.guardImpact.updateView(camera);
   const _q = gpuTimer ? gpuTimer.begin() : null;
   composer.render();
   if (gpuTimer && _q) gpuTimer.end(_q);
@@ -2395,6 +2866,7 @@ function loop(now) {
   const dtReal = THREE.MathUtils.clamp((now - lastTime) / 1000, 0, 0.1);
   lastTime = now;
 
+  let dodgeScale = 1;
   if (atTitle) {
     frameTitle(now);
   } else if (bossIntro) {
@@ -2402,16 +2874,21 @@ function loop(now) {
     bossIntro.frameCamera(camera, settings.state().fov);
     if (bossIntro.finished) finishBossIntro();
   } else if (combatReady && !CFG.paused) {
-    acc += dtReal * CFG.timeScale;
+    // Average both ends of this render interval so the ramp is stable at different refresh rates.
+    const previousScale = dodgeTimeScale();
+    dodgeSlowTime = Math.max(0, dodgeSlowTime - dtReal);
+    dodgeScale = (previousScale + dodgeTimeScale()) * .5;
+    acc += dtReal * CFG.timeScale * dodgeScale;
     let guard = 0;
     while (acc >= STEP && guard++ < 5) {
       tick();
       acc -= STEP;
     }
-    updateCamera(dtReal);
+    dodgeVisualAlpha = dodgePoseAlpha();
+    updateCamera(dtReal, dodgeVisualAlpha);
   }
 
-  render(dtReal);
+  render(dtReal, dodgeScale);
   updateHUD();
 
   __fpsFrames++; __fpsAcc += dtReal;
@@ -2435,6 +2912,8 @@ const hudPhase = document.getElementById('hudPhase');
 const playerLife = document.getElementById('playerLife');
 const playerHud = playerLife.closest('.player-hud');
 const playerPoise = document.getElementById('playerPoise');
+const ultimateMeter = document.getElementById('ultimateMeter');
+const ultimateValue = document.getElementById('ultimateValue');
 const bossLife = document.getElementById('bossLife');
 const bossPoise = document.getElementById('bossPoise');
 const bannerEl = document.getElementById('banner');
@@ -2505,20 +2984,29 @@ function frameBar(a) {
 
 /** 格挡专用条：只关心「弹反窗还剩几帧」 */
 function guardBar(a) {
-  if (a.frame > 8) return '<span class="k">格挡稳定 · 弹反窗已过</span>';
-  const left = 9 - a.frame;
-  return `<span class="warn">弹反窗 ${bar(left, 8, 8)} ${a.frame}/8</span>`;
+  if (a.frame > PARRY_WINDOW) return '<span class="k">持续架势 · 消耗韧性</span>';
+  const left = PARRY_WINDOW + 1 - a.frame;
+  return `<span class="warn">弹反窗 ${bar(left, PARRY_WINDOW, 8)} ${a.frame}/${PARRY_WINDOW}</span>`;
 }
 
 function updateHUD() {
   if (grabTestMode) updateGrabTestStatus();
   hudMeter(playerLife, player.hp, player.maxHp);
   hudMeter(playerPoise, player.poise, player.maxPoise);
+  playerHud.classList.toggle('poise-low', player.poise <= MOVES.p_heavy.stamina);
+  playerHud.classList.toggle('poise-broken', player.state === 'guardbreak');
+  bossHud.classList.toggle('poise-broken', boss.state === 'guardbreak');
+  hudMeter(ultimateMeter, ultimateEnergy, ULTIMATE_MAX);
+  const ultimateReady = ultimateEnergy >= ULTIMATE_MAX;
+  playerHud.classList.toggle('ultimate-ready', ultimateReady);
+  hudText(ultimateValue, ultimateReady ? '可释放' : `${ultimateEnergy}%`);
   hudMeter(bossLife, boss.hp, boss.maxHp);
   hudMeter(bossPoise, boss.poise, boss.maxPoise);
   playerHud.classList.toggle('is-low', player.hp < player.maxHp * 0.25);
   hudText(hudHealth, `${Math.round(player.hp)} / ${Math.round(player.maxHp)}`);
-  const status = [player.lockOn ? '锁定' : '', player.iframe > 0 ? '无敌' : ''].filter(Boolean).join(' · ');
+  const status = [player.lockOn ? '锁定' : '',
+    player.state === 'guardbreak' ? '破势' : logicFrame < player.counterUntil ? '反击窗口' : player.iframe > 0 ? '无敌' : '',
+  ].filter(Boolean).join(' · ');
   hudStatus.hidden = !status;
   hudText(hudStatus, status);
   hudText(hudFps, __fps ? String(__fps) : '–');
@@ -2529,12 +3017,12 @@ function updateHUD() {
   const bloodMoon = AI.phase2 || AI.phase3;
   const phase = bloodMoon ? 'blood' : 'normal';
   if (bossHud.dataset.phase !== phase) bossHud.dataset.phase = phase;
-  hudText(hudPhase, boss.state === 'dead' ? '已击败' : AI.phase3 ? '血月 · 第三阶段' : bloodMoon ? '血月 · 第二阶段' : '第一阶段');
+  hudText(hudPhase, boss.state === 'dead' ? '已击败' : boss.state === 'guardbreak' ? '破势 · 伤害提升' : boss.state === 'ultimateStun' ? '僵直' : AI.phase3 ? '血月 · 第三阶段' : bloodMoon ? '血月 · 第二阶段' : '第一阶段');
 
   if (!hud.classList.contains('show-debug')) return;
   const dist = player.pos.distanceTo(boss.pos);
   debugHud.innerHTML =
-    `玩家 ${stateLabel(player)} · 韧性 ${Math.round(player.poise)}
+    `玩家 ${stateLabel(player)} · 韧性 ${Math.round(player.poise)}/${Math.round(player.maxPoise)}
 ${player.state === 'block' ? guardBar(player) : frameBar(player)}
 首领 ${stateLabel(boss)} · 韧性 ${Math.round(boss.poise)} · ${dist.toFixed(1)} m
 ${frameBar(boss)}
@@ -2808,12 +3296,24 @@ function resetFight() {
   Object.assign(AI, initialBossAI());
   clearBufferedInput();
   STAGE.setPhase(1);
+  ultimateCast = null;
   if (typeof snapCamera === 'function') snapCamera();
   rng = mulberry32(0xC0FFEE);
   logicFrame = 0;
   hitstopFrames = 0;
   shakeAmt = 0;
   vfx.clear();
+  dodgeEffect.clear();
+  perfectDodgeFrame = null;
+  dodgeSlowTime = 0;
+  dodgeVisualAlpha = 1;
+  acc = 0;
+  ultimateEnergy = 0;
+  releasedUltimate = null;
+  ultimateEffect.clear();
+  meteorSmash = null;
+  impactImpulse = 0;
+  bossSmashEffect.clear();
   boss.stunMarks = [];
   boss.armorUntil = -1;
   scratch.clear();
@@ -2871,6 +3371,15 @@ function returnToTitle() {
 }
 
 function completeLoading() {
+  const target = renderer.getRenderTarget();
+  renderer.setRenderTarget(composer.readBuffer);
+  try {
+    renderer.compile(ultimateEffect.root, camera, scene);
+    renderer.compile(bossSmashEffect.root, camera, scene);
+  } finally {
+    renderer.setRenderTarget(target);
+  }
+  dodgeEffect.prepare(player.binder?.root ?? player.mesh.group, renderer, camera, composer.readBuffer);
   assetsReady = true;
   startButton.disabled = false;
   const status = document.getElementById('titleLoading');
@@ -2980,6 +3489,13 @@ async function attachModels() {
     if (wantAnim) {
       banner('加载动作包…', 1200);
       const counts = await Promise.all(actors.filter(actor => actor.binder).map(actor => loadAnimationPack(actor.binder)));
+      if (player.binder && pUrl === 'assets/player/player.glb') {
+        try {
+          playerUltimateMotion = await loadPlayerUltimate(player.binder);
+        } catch (error) {
+          console.warn('[ultimate] Could not load the supplied move:', error);
+        }
+      }
       const grabClips = [
         [boss.binder, 'grabKick', 'assets/anims/GrabSideKick.json'],
         [player.binder, 'grabGetUp', 'assets/anims/GrabGetUp.json'],
@@ -2997,6 +3513,13 @@ async function attachModels() {
       // Boss 用自带动作包（assets/boss_anims.glb，同一套 Tripo 骨架，直接播）
       let bossPicked = 0;
       if (boss.binder) {
+        if (bUrl === 'assets/boss_model_v2.glb') {
+          try {
+            await loadNativeClip(boss.binder, 'assets/anims/BossMeteorSmashSource.json', 'b_meteor', METEOR.end / 60);
+          } catch (error) {
+            console.warn('[boss-anim] 无法加载蓄力一击:', error);
+          }
+        }
         try {
           bossPicked = await loadClipPack(boss.binder, 'assets/boss_anims.glb', {
             map: {

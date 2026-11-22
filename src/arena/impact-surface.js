@@ -7,36 +7,50 @@ export function createImpactSurface(stone) {
   const footprint = { value: new THREE.Vector3() };
   const rock = stone.clone();
   rock.vertexColors = true;
-  const basin = rock.clone();
   const heat = { value: 0 };
-  basin.onBeforeCompile = shader => {
-    shader.uniforms.crackHeat = heat;
-    shader.vertexShader = 'varying vec2 basinPoint;\n' + shader.vertexShader.replace(
-      '#include <begin_vertex>', '#include <begin_vertex>\n basinPoint = position.xz;'
-    );
-    shader.fragmentShader = 'varying vec2 basinPoint;\n uniform float crackHeat;\n' + shader.fragmentShader.replace(
-      '#include <color_fragment>', `
-        #include <color_fragment>
-        float r = length(basinPoint);
-        float a = atan(basinPoint.y, basinPoint.x);
-        float line = a * 6.0 + 0.36 * sin(a * 5.0 + r * 8.0) + 0.28 * sin(r * 24.0 + a * 2.0);
-        float split = abs(sin(line));
-        float branch = abs(sin(line + smoothstep(.35, 1.02, r) * .95));
-        float width = 0.11 - r * .037;
-        float jagged = .023 * sin(r * 91.0 + a * 33.0);
-        float crack = 1.0 - smoothstep(width * .35, width, split + jagged);
-        crack = max(crack, (1.0 - smoothstep(.018, .052, branch)) * smoothstep(.42,.65,r) * .77);
-        crack *= smoothstep(.06,.23,r) * (1.0-smoothstep(.91,1.05,r));
-        diffuseColor.rgb *= mix(1.0, 0.15, crack);
-      `
-    ).replace('#include <emissivemap_fragment>', `
-        #include <emissivemap_fragment>
-        totalEmissiveRadiance += vec3(.53,.041,.008) * crack * crackHeat * smoothstep(.18,.56,r);
-      `);
+  const flow = { value: 0 };
+  const buildBasinMaterial = molten => {
+    const basin = rock.clone();
+    basin.onBeforeCompile = shader => {
+      shader.uniforms.crackHeat = heat;
+      shader.uniforms.molten = { value: Number(molten) };
+      shader.uniforms.flowTime = flow;
+      shader.vertexShader = 'varying vec2 basinPoint;\n' + shader.vertexShader.replace(
+        '#include <begin_vertex>', '#include <begin_vertex>\n basinPoint = position.xz;'
+      );
+      shader.fragmentShader = 'varying vec2 basinPoint;\n uniform float crackHeat, molten, flowTime;\n' + shader.fragmentShader.replace(
+        '#include <color_fragment>', `
+          #include <color_fragment>
+          float r = length(basinPoint);
+          float a = atan(basinPoint.y, basinPoint.x);
+          float line = a * 6.0 + 0.36 * sin(a * 5.0 + r * 8.0) + 0.28 * sin(r * 24.0 + a * 2.0);
+          float split = abs(sin(line));
+          float branch = abs(sin(line + smoothstep(.35, 1.02, r) * .95));
+          float width = 0.11 - r * .037;
+          float jagged = .023 * sin(r * 91.0 + a * 33.0);
+          float crack = 1.0 - smoothstep(width * .35, width, split + jagged);
+          crack = max(crack, (1.0 - smoothstep(.018, .052, branch)) * smoothstep(.42,.65,r) * .77);
+          crack *= smoothstep(.06,.23,r) * (1.0-smoothstep(.91,1.05,r));
+          float pool = (1.0 - smoothstep(.10,.45,r + .035 * sin(a*8.0+r*24.0)))
+            * (.52 + .48 * sin(r*37.0 + a*3.0 - flowTime*3.2));
+          float lava = max(crack, pool * .86) * molten;
+          float embers = .57 + .43 * sin(a*6.0 + r*18.0 - flowTime*4.2);
+          diffuseColor.rgb *= mix(1.0, 0.15, max(crack,lava));
+        `
+      ).replace('#include <emissivemap_fragment>', `
+          #include <emissivemap_fragment>
+          totalEmissiveRadiance += vec3(.53,.041,.008) * crack * crackHeat * smoothstep(.18,.56,r);
+          totalEmissiveRadiance += mix(vec3(.79,.071,.005),vec3(2.7,.68,.052),embers)
+            * lava * (.28 + crackHeat);
+        `);
+    };
+    return basin;
   };
+  const basin = buildBasinMaterial(false);
+  const lavaBasin = buildBasinMaterial(true);
 
   return {
-    rock, basin, heat,
+    rock, basin, lavaBasin, heat, flow,
     set(center, radius) { footprint.value.set(center.x, center.z, radius); },
     clip(material) {
       material.onBeforeCompile = shader => {

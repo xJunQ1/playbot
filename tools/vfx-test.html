@@ -28,7 +28,7 @@
     }
   </style>
   <script type="importmap">
-{ "imports": { "three": "/node_modules/three/build/three.module.js" } }
+{ "imports": { "three": "/node_modules/three/build/three.module.js", "three/addons/": "/node_modules/three/examples/jsm/" } }
 </script>
 </head>
 
@@ -36,6 +36,9 @@
   <div id="log">booting…</div>
   <script type="module">
     import * as THREE from 'three';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
     import { MeleeVFX, VFX_CFG } from '../src/vfx/melee.js';
 
     const el = document.getElementById('log');
@@ -100,7 +103,12 @@
       vfx.parry(player);
       step(3);
 
-      renderer.render(scene, camera);
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new OutputPass());
+      composer.addPass(vfx.guardImpact.pass);
+      vfx.guardImpact.updateView(camera);
+      composer.render();
 
       const info = renderer.info.render;
       log(`effects=${vfx.activeCount}  calls=${info.calls}  tris=${info.triangles}`);

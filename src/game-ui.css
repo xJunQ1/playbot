@@ -102,7 +102,27 @@ button { color: inherit; cursor: pointer; }
 .poise-label { color: #e4d3f2; white-space: nowrap; font-size: 10px; }
 .player-poise { height: 5px; flex: 1 1 auto; clip-path: polygon(0 0, 100% 0, calc(100% - 5px) 100%, 0 100%); }
 .player-poise .meter-fill { background: linear-gradient(90deg, #695fa2, #c6bbf0); }
+.player-hud.poise-low .player-poise .meter-fill { background: linear-gradient(90deg,#9b4c72,#f19790); }
+.player-hud.poise-low .poise-label { color: #ffc2b4; }
 .player-value { color: #f1d4cb; margin-left: 4px; font: 11px/1 var(--mono); letter-spacing: .02em; white-space: nowrap; }
+
+.ultimate-line { margin-top: 6px; color: #edd7ac; }
+.ultimate-label { font-size: 10px; white-space: nowrap; }
+.ultimate-meter {
+  --fill: 0;
+  height: 7px;
+  flex: 1;
+  box-shadow: inset 0 0 0 1px #e7bee066, 0 2px 9px #100913a8;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+}
+.ultimate-meter .meter-fill { background: linear-gradient(90deg,#6252a2,#a681dc 55%,#efd290); }
+.ultimate-value { font: 10px/1 var(--mono),var(--ui); white-space: nowrap; }
+.ultimate-line kbd { min-height: 1.35em; color: #d9c1e8; border-color: #b58daa83; }
+.ultimate-ready .ultimate-meter .meter-fill { background: linear-gradient(90deg,#ad6eb5,#fcd68e 72%,#fff2cb); }
+.ultimate-ready .ultimate-line { color: #ffe7a9; filter: drop-shadow(0 0 5px #eeb67572); }
+.ultimate-ready .ultimate-line kbd { color: #fff0c5; border-color: #e7c080; background: #68443e; }
+#banner[data-kind="dodge"] .banner-inner { color: #c1efff; border-color: #75dbff93; }
+#banner[data-kind="ultimate"] .banner-inner { color: #ffe1a0; border-color: #e9be7caa; }
 
 .arena-hud {
   position: absolute;
@@ -172,6 +192,11 @@ button { color: inherit; cursor: pointer; }
 .boss-life .meter-fill { background: linear-gradient(180deg, #f08098 0%, #b62c50 43%, #7b172e 100%); }
 .boss-poise { height: 4px; margin: 3px 10px 0; }
 .boss-poise .meter-fill { background: linear-gradient(90deg, #917178, #f1c69b); }
+.poise-broken .player-poise, .poise-broken .boss-poise { background: #5e2839; }
+.poise-broken .player-poise .meter-fill, .poise-broken .boss-poise .meter-fill {
+  background: linear-gradient(90deg, #ab4f57, #ffbb89);
+}
+.boss-hud.poise-broken .boss-phase { color: #ffba8f; }
 .boss-hud[data-phase="blood"] .boss-life .meter-fill { background: linear-gradient(180deg, #ff9b9d, #ed3761 45%, #9c1640); }
 .boss-hud[data-phase="blood"] .boss-rule { border-color: #f68693ab; }
 .boss-hud[data-phase="blood"] .boss-phase { color: #ffc1b6; }

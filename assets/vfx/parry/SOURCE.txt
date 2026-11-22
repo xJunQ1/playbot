@@ -1,2 +1,7 @@
-XsxB-Slash / examples/parry_fable
+XSXB-Slash / examples/parry_fable
+MIT License is included alongside the original masks and audio.
+The native Three.js port uses the example's normal and perfect tiers.
+SphereScatter, local smoke expansion, and full-frame heat ripples adapt the
+upstream PARRY_MIGRATION_20261117 and PARRY_MIGRATION_20261118 notes:
+https://github.com/sparklecatta-lang/XSXB-Slash/tree/40c07682eb598d2f2411c3a5008fa2e29b7acb09/docs
 https://github.com/sparklecatta-lang/XsxB-Slash/tree/40c07682eb598d2f2411c3a5008fa2e29b7acb09/examples/parry_fable

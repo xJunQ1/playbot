@@ -28,9 +28,15 @@
       <div class="player-heading"><strong>玩家</strong><span id="hudStatus" hidden></span></div>
       <div class="meter player-life" id="playerLife" role="meter" aria-label="玩家生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span></div>
       <div class="meter-line">
-        <span class="poise-label">韧性</span>
+        <span class="poise-label" title="轻击命中回韧，重击与持续格挡消耗韧性。弹反或完美闪避后可接反击。">韧性</span>
         <div class="meter player-poise" id="playerPoise" role="meter" aria-label="玩家韧性" aria-valuemin="0"><span class="meter-fill"></span></div>
         <span class="player-value" id="hudHealth"></span>
+      </div>
+      <div class="meter-line ultimate-line">
+        <span class="ultimate-label">大招</span>
+        <div class="meter ultimate-meter" id="ultimateMeter" role="meter" aria-label="大招能量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="meter-fill"></span></div>
+        <span class="ultimate-value" id="ultimateValue">0%</span>
+        <kbd data-binding="ultimate">Q</kbd>
       </div>
     </div>
   </section>
@@ -56,8 +62,8 @@
 <div id="help" aria-label="战斗操作">
   <span><kbd data-binding="fwd left back right">W A S D</kbd>移动</span>
   <span><kbd data-binding="roll">Shift / Space</kbd>翻滚</span>
-  <span><kbd data-binding="light">左键</kbd>轻击</span>
-  <span><kbd data-binding="heavy">F</kbd>重击</span>
+  <span><kbd data-binding="light">左键</kbd>轻击回韧</span>
+  <span><kbd data-binding="heavy">F</kbd>重击削韧</span>
   <span><kbd data-binding="block">右键</kbd>格挡 / 弹反</span>
   <span><kbd data-binding="lock">中键</kbd>锁定</span>
 </div>
@@ -127,7 +133,7 @@
             <p class="info">点击按键后输入新键，按 Esc 取消。</p>
             <div class="keys" id="keyList"></div>
           </section>
-          <div class="fixed-controls"><span><kbd>R</kbd>重开</span><span><kbd>F1</kbd>判定框</span><span><kbd>F2</kbd>慢放</span><span><kbd>F3</kbd>暂停</span><span><kbd>P</kbd>导出帧表</span></div>
+          <div class="fixed-controls"><span><kbd>R</kbd>重开</span><span><kbd>F1</kbd>判定框</span><span><kbd>F2</kbd>慢放</span><span><kbd>F3</kbd>暂停</span><span><kbd>F4</kbd>切换画质</span><span><kbd>P</kbd>导出帧表</span></div>
         </section>
 
         <section id="settingsSystem" class="setting-pane" role="tabpanel" aria-labelledby="tabSystem" tabindex="0" hidden>

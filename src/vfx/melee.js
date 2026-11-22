@@ -410,17 +410,17 @@ export class MeleeVFX {
     });
   }
 
-  guard(actor, attacker) {
-    this._clash(actor, attacker, 'normal');
+  guard(actor, attacker, contact) {
+    this._clash(actor, attacker, 'normal', contact);
   }
 
-  parry(actor, attacker) {
-    this._clash(actor, attacker, 'perfect');
+  parry(actor, attacker, contact) {
+    this._clash(actor, attacker, 'perfect', contact);
   }
 
-  _clash(actor, attacker, tier) {
+  _clash(actor, attacker, tier, contact) {
     if (!actor || !VFX_CFG.enabled || VFX_CFG.intensity <= 0) return;
-    this.effects.push(this.guardImpact.burst(actor, tier, this.getCamera(), VFX_CFG.intensity, attacker));
+    this.effects.push(this.guardImpact.burst(actor, tier, this.getCamera(), VFX_CFG.intensity, attacker, contact));
   }
 
   // ── 生命周期 ───────────────────────────────────────────────
@@ -600,6 +600,7 @@ export class MeleeVFX {
   clear() {
     for (const e of this.effects) e.dispose();
     this.effects.length = 0;
+    this.guardImpact.resetAudio();
   }
 
   dispose() {

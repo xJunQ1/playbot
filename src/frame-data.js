@@ -1,3 +1,5 @@
+import { METEOR } from './meteor-smash.js';
+
 // ─────────────────────────────────────────────────────────────
 //  帧数据表 —— 这是整个战斗的全部真相
 //  所有数值单位：帧（60fps）/ 米 / 点
@@ -133,7 +135,7 @@ export const MOVES = {
     label: '横扫（中）',
     swing: 'horizontal',
     startup: 54, active: 16, recovery: 20, cancelFrom: 14,
-    damage: 320, poise: 0, hitstun: 22, stamina: 0,
+    damage: 320, poise: 32, hitstun: 22, stamina: 0,
     motion: [[0, 0], [54, 0.15], [62, 1.10], [74, 1.60], [90, 1.60]],
     // offset/radius 会乘 boss.scale：0.85×2.6=2.2m 前方、0.45×2.6=1.17m 半径
     // 远端 4.16m，要盖过 stopDist（3.69m），否则 Boss 站在攻击距离外永远打空
@@ -143,7 +145,7 @@ export const MOVES = {
   b_slam: {
     label: '下砸（慢）', swing: 'vertical',
     startup: 38, active: 18, recovery: 34, cancelFrom: 16,
-    damage: 420, poise: 0, hitstun: 30, stamina: 0,
+    damage: 420, poise: 42, hitstun: 30, stamina: 0,
     motion: [[0, 0], [38, 0.10], [50, 0.60], [90, 0.60]],
     // 下砸范围本来就大：0.95×2.6=2.47m 前方、0.65×2.6=1.69m 半径
     hitbox: { offset: 1.05, radius: 0.70, yMin: 0.0, yMax: 0.52 },
@@ -153,7 +155,7 @@ export const MOVES = {
   b_heavy_combo: {
     label: '重剑四连斩', swing: 'horizontal',
     startup: 24, active: 8, recovery: 204, cancelFrom: 0,
-    damage: 165, poise: 0, hitstun: 16, stamina: 0,
+    damage: 165, poise: 17, hitstun: 16, stamina: 0,
     // 挥砍窗口按实际剑尖轨迹校准。最后一段是纵向下砸。
     followUps: [
       { delay: 36, active: 7 },
@@ -165,6 +167,13 @@ export const MOVES = {
     hitbox: { offset: 0.76, radius: 0.58, yMin: 0.0, yMax: 0.75 },
     minRange: 2.7, maxRange: 4.5, weight: 0.48, cooldown: 8,
     requiresClip: true,
+  },
+  b_meteor: {
+    label: '熔岩跃砸', swing: 'none', meteor: true, requiresClip: true,
+    startup: METEOR.landingFrame, active: 1, recovery: METEOR.end - METEOR.impact - 1, cancelFrom: 0,
+    damage: 490, poise: 55, hitstun: 35, stamina: 0,
+    hitbox: { offset: 0, radius: METEOR.radius, yMin: 0, yMax: 2.15 },
+    minRange: 2.8, maxRange: 12.8, weight: 1.32, cooldown: 12,
   },
   b_grab: {
     label: '破防擒拿', swing: 'none', grab: true,
