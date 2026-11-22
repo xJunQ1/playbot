@@ -15,6 +15,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { DEATH_POSE_FRAMES, poseFor } from './pose.js';
 import { FootIK } from './footik.js';
+import { IMPACT, ImpactCamera } from './combat-feedback.js';
 import { MeleeVFX, VFX_CFG } from './vfx/melee.js';
 import { guardFromAO } from './vfx/ao-guard.js';
 import { GroundScratch } from './vfx/scratch.js';
@@ -363,6 +364,7 @@ function syncSharpen() {
 syncSharpen();
 composer.addPass(sharpen);
 // The heat ripple warps the finished frame, including the swords and sparks.
+const impactCamera = new ImpactCamera();
 const dodgeEffect = new PerfectDodgeEffect(scene);
 const ultimateEffect = new UltimateEffect(scene);
 const bossSmashEffect = new BossSmashEffect(scene, STAGE.impactSurface);
@@ -563,6 +565,8 @@ function consume(name, window = BUFFER_WINDOW) {
 console.log('[build] turn-v3 / back-latched / yaw-stripped');
 const HITSTOP_LIGHT = () => CFG.hitstop;
 const HITSTOP_HEAVY = () => CFG.hitstopHeavy;
+const hitFlashTint = new THREE.Color(0xf1eaff);
+const HIT_SLIDE_FRAMES = 8;
 
 class Actor {
   constructor({ name, isBoss, scale, pos, hp, poise, hurt }) {
@@ -587,7 +591,12 @@ class Actor {
     this.hitSet = new Set();
     this.lockOn = false;
     this.stunTimer = 0;
-    this.flashTimer = 0;
+    this.hitAge = 1;
+    this.hitWeight = 0;
+    this.hitRecoil = new THREE.Vector3();
+    this.hitSlide = new THREE.Vector3();
+    this.hitSlideFrames = 0;
+    this.hitFlashMaterials = [];
     this.footIK = new FootIK();
     this.previousPosition = this.pos.clone();
     this.previousYaw = this.yaw;
@@ -702,14 +711,56 @@ class Actor {
       ? THREE.MathUtils.lerp(this.previousFrame, this.frame, alpha) : this.frame;
   }
 
-  syncMesh(alpha = 1) {
+  syncMesh(alpha = 1, dt = 0) {
     this.samplePosition(alpha, this.mesh.group.position);
     const yaw = this.previousAction === this.actionSequence ? lerpYaw(this.previousYaw, this.yaw, alpha) : this.yaw;
     this.mesh.group.rotation.set(0, yaw, 0, 'YXZ');
-    // 受击闪白（闪红会让蓝色角色变紫，读不出「刚被打中」）
-    const f = this.flashTimer > 0 ? 1 : 0;
-    this.mesh.matBody.emissive?.setHex?.(f ? 0xffffff : 0x000000);
-    this.mesh.matBody.emissiveIntensity = f ? 0.85 : 0;
+    const t = Math.min(1,this.hitAge/.17);
+    if (this.reactingToHit) {
+      const pulse = (1-t)**2 * (.60+.46*Math.sin(Math.PI*t*1.9));
+      this.mesh.group.position.addScaledVector(this.hitRecoil,pulse);
+    }
+    this.updateHitFlash(this.hitWeight*(1-t)**3);
+    this.hitAge += dt;
+  }
+
+  get reactingToHit() {
+    return this.state === 'hitstun' || this.state === 'guardbreak' || this.state === 'ultimateStun';
+  }
+
+  stepHitSlide() {
+    if (!this.reactingToHit) {
+      this.hitSlideFrames = 0;
+      return;
+    }
+    const frames = this.hitSlideFrames;
+    if (frames <= 0) return;
+    this.hitSlideFrames--;
+    this.pos.addScaledVector(this.hitSlide,(2*frames-1)/HIT_SLIDE_FRAMES**2);
+    this.clampToArena();
+  }
+
+  updateHitFlash(glow) {
+    if (!glow && !this.modelFlashing) return;
+    const root = this.binder?.root ?? this.mesh.group;
+    if (root !== this.hitFlashRoot) {
+      const materials = new Set();
+      root.traverse(object => {
+        if (!object.isMesh) return;
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+          if (material?.emissive) materials.add(material);
+        }
+      });
+      this.hitFlashMaterials = Array.from(materials,material => ({
+        material, emissive: material.emissive.clone(), intensity: material.emissiveIntensity,
+      }));
+      this.hitFlashRoot = root;
+    }
+    for (const { material, emissive, intensity } of this.hitFlashMaterials) {
+      material.emissive.copy(emissive).lerp(hitFlashTint,glow*.37);
+      material.emissiveIntensity = intensity + glow*.23;
+    }
+    this.modelFlashing = glow>0;
   }
 
   reset(pos, yaw) {
@@ -725,7 +776,12 @@ class Actor {
     this.speed = 0;
     this.stunTimer = 0;
     this.iframe = 0;
-    this.flashTimer = 0;
+    this.hitAge = 1;
+    this.hitWeight = 0;
+    this.hitRecoil.set(0,0,0);
+    this.hitSlide.set(0,0,0);
+    this.hitSlideFrames = 0;
+    this.updateHitFlash(0);
     this.rememberVisualFrame();
   }
 }
@@ -821,8 +877,6 @@ const HIT_POISE_REGEN_RATE = .24;
 let ultimateCast = null, releasedUltimate = null, playerUltimateMotion = null;
 let meteorSmash = null;
 const ultimateDelta = new THREE.Vector3();
-const waveStartProbe = new THREE.Vector3(), waveEndProbe = new THREE.Vector3();
-const waveSweep = new THREE.Line3(waveStartProbe, waveEndProbe);
 const ultimateTarget = new THREE.Vector3();
 const POISE_BREAK_FRAMES = { player: 44, boss: 96 };
 const rollSweep = new THREE.Line3();
@@ -897,8 +951,7 @@ function resolveHit(attacker, defender, hb) {
     return;
   }
   attacker.hitSet.add(hitKey);
-  if (defender.state !== 'block') vfx.hit(attacker, defender, hb);
-  applyDamage(attacker, defender, attacker.move);
+  applyDamage(attacker, defender, attacker.move, hb);
 }
 
 // ── Boss 超霸体 ──────────────────────────────────────────────
@@ -1007,7 +1060,7 @@ function stepPoiseBreak(actor) {
   actor.setState('idle');
 }
 
-function applyDamage(attacker, defender, move) {
+function applyDamage(attacker, defender, move, hitbox) {
   if (defender === player && player.state === 'block') {
     if (player.frame <= PARRY_WINDOW) {
       if (!damagePoise(boss, PARRY_POISE_DAMAGE)) {
@@ -1020,8 +1073,8 @@ function applyDamage(attacker, defender, move) {
       restorePlayerPoise(PARRY_POISE_RETURN, .94);
       player.counterUntil = logicFrame + COUNTER_WINDOW;
       player.iframe = 20;
-      shake(0.14);
-      hitstop(HITSTOP_HEAVY());
+      cameraImpact(attacker.forward.negate(),IMPACT.parry.shake,.19);
+      hitstop(Math.round(HITSTOP_HEAVY()*IMPACT.parry.stop));
       vfx.parry(player, attacker, guardContact(player, attacker));
       return;
     }
@@ -1029,11 +1082,9 @@ function applyDamage(attacker, defender, move) {
     const pressure = move.poise * 1.45;
     const spill = Math.max(0, pressure - player.poise);
     if (spill > 0) defender.hp = Math.max(0, defender.hp - move.damage * .42 * spill / pressure);
-    damagePoise(defender, pressure, 0, true);
-    shake(0.05);
-    hitstop(HITSTOP_LIGHT());
+    const broken = damagePoise(defender, pressure, 0, true);
+    guardFeedback(attacker,defender,broken);
     vfx.guard(player, attacker, guardContact(player, attacker));
-    flash(defender);
     finishDeath(defender);
     return;
   }
@@ -1042,10 +1093,8 @@ function applyDamage(attacker, defender, move) {
   if (counter) player.counterUntil = 0;
   if (defender === boss && boss.state === 'block' && !counter) {
     defender.hp = Math.max(0, defender.hp - move.damage * .30);
-    damagePoise(defender, move.poise * .80);
-    defender.flashTimer = 3;
-    shake(0.05);
-    hitstop(HITSTOP_LIGHT());
+    const broken = damagePoise(defender, move.poise * .80);
+    guardFeedback(attacker,defender,broken);
     vfx.guard(boss, attacker, guardContact(boss, attacker));
     finishDeath(defender);
     return;
@@ -1076,22 +1125,66 @@ function applyDamage(attacker, defender, move) {
     defender.setState('hitstun');
     defender.stunTimer = move.hitstun;
   }
-  defender.flashTimer = 4;
-
   // Boss 挨打记账：越打越凶。复仇窗口内间隔缩短、只进攻、优先快招。
   if (defender === boss) {
     AI.revengeHits = (AI.revengeHits || 0) + 1;
     AI.revengeUntil = logicFrame + 80 + AI.revengeHits * 12;   // 1.3s 起，连击越久越凶
   }
 
-  shake(0.06 + dmg / 4000);
-  hitstop(dmg > 200 ? HITSTOP_HEAVY() : HITSTOP_LIGHT());
-  flash(defender);
-
+  const profile = shattered ? IMPACT.break : attackImpact(attacker,hitbox.strike);
+  const direction = contactDirection(attacker,defender,move.meteor ? hitbox.center : attacker.pos);
+  const strong = profile.weight >= .70 || profile === IMPACT.bossSlash;
+  playImpact(defender,direction,profile,strong,hitbox.strike.swing === 'vertical');
+  if (!move.meteor) vfx.hit(meleeContact(attacker,defender,hitbox),direction,
+    profile.weight,attacker.isBoss,hitbox.strike.swing);
   finishDeath(defender);
 }
 
-function flash(a) { a.flashTimer = 4; }
+function attackImpact(actor, strike) {
+  if (actor.move?.meteor) return IMPACT.meteor;
+  if (actor.isBoss) return strike?.swing === 'vertical' ? IMPACT.bossSlam : IMPACT.bossSlash;
+  if (actor.moveId === 'p_heavy3') return IMPACT.heavyEnd;
+  if (actor.moveId?.startsWith('p_heavy')) return IMPACT.heavy;
+  return actor.moveId === 'p_light4' ? IMPACT.lightEnd : IMPACT.light;
+}
+
+function contactDirection(attacker, defender, origin = attacker.pos) {
+  const direction = defender.pos.clone().sub(origin).setY(0);
+  return direction.lengthSq() > .01 ? direction.normalize() : attacker.forward;
+}
+
+function meleeContact(attacker, defender, hitbox) {
+  const { yMin, yMax } = hitbox;
+  const height = defender.hurt.height * defender.scale;
+  const low = Math.max(yMin,defender.pos.y+height*.24);
+  const high = Math.min(yMax,defender.pos.y+height*.80);
+  const point = defender.pos.clone().addScaledVector(contactDirection(attacker,defender),-.28*defender.scale);
+  point.y = low <= high ? THREE.MathUtils.clamp(defender.pos.y+height*.55,low,high) : (yMin+yMax)*.5;
+  const blade = attacker.binder?.weaponGroup;
+  if (!blade || attacker.move?.meteor || !sampleWeaponBlade(blade,contactBlade.start,contactBlade.end)) return point;
+  contactBlade.closestPointToPoint(point,true,contactNear);
+  if (contactNear.distanceToSquared(point) < (.64*defender.scale)**2) {
+    point.lerp(contactNear,.44);
+    point.y = THREE.MathUtils.clamp(point.y,yMin,yMax);
+  }
+  return point;
+}
+
+function guardFeedback(attacker, defender, broken) {
+  const profile = broken ? IMPACT.break : IMPACT.guard;
+  const direction = contactDirection(attacker,defender);
+  playImpact(defender,direction,profile,broken);
+}
+
+function playImpact(defender, direction, profile, heavy, vertical = false) {
+  hitstop(Math.round((heavy ? HITSTOP_HEAVY() : HITSTOP_LIGHT()) * profile.stop));
+  if (profile !== IMPACT.meteor) cameraImpact(direction,profile.shake,vertical ? -.64 : .27);
+  defender.hitAge = 0;
+  defender.hitWeight = .36+profile.weight*.62;
+  defender.hitRecoil.copy(direction).multiplyScalar(profile.recoil);
+  defender.hitSlide.copy(direction).multiplyScalar(profile.push);
+  defender.hitSlideFrames = defender.reactingToHit && profile.push > 0 ? HIT_SLIDE_FRAMES : 0;
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  5. 玩家状态机
@@ -1136,16 +1229,17 @@ function strikeUltimate(cast, cut) {
     boss.moving = false;
     boss.speed = 0;
   }
-  flash(boss);
-  shake(finisher ? .18 : .043);
-  hitstop(finisher ? 4 : 1);
+  const kick = ULTIMATE_KICKS.indexOf(cut);
+  const direction = finisher ? cast.wave.direction : contactDirection(player,boss);
+  const profile = finisher ? IMPACT.finisher : kick === 1 ? IMPACT.kickEnd : kick === 0 ? IMPACT.kick : IMPACT.ultimateCut;
+  playImpact(boss,direction,profile,finisher,finisher);
   finishDeath(boss);
 }
 
 function resolveUltimateCuts(cast) {
   const frame = player.frame;
   if (frame === FINISHER.hit && !cast.wave) {
-    startFinisher(cast, player.pos);
+    startFinisher(cast, player.pos, boss.state !== 'dead' ? boss.pos : null);
     cast.wave.firedAt = logicFrame;
     releasedUltimate = cast;
   }
@@ -1173,12 +1267,17 @@ function resolveUltimateWave() {
   }
   if (wave.struck || age > FINISHER.duration || boss.state === 'dead' || boss.iframe > 0 || boss.pos.y > 1.30) return;
   const frame = FINISHER.hit + age;
-  waveStartProbe.copy(wave.origin).addScaledVector(wave.direction, finisherRun(frame - 1) - .8);
-  waveEndProbe.copy(wave.origin).addScaledVector(wave.direction, finisherRun(frame) + 1.05);
-  const reach = 1.92 + Math.min(.60, boss.hurt.radius * boss.scale * .28);
-  if (waveSweep.closestPointToPoint(ultimateTarget.copy(boss.pos).setY(0), true, ultimateDelta)
-    .distanceToSquared(ultimateTarget) <= reach ** 2) {
+  const relative = ultimateTarget.copy(boss.pos).sub(wave.origin).setY(0);
+  const travel = relative.dot(wave.direction);
+  const cross = relative.x * wave.direction.z - relative.z * wave.direction.x;
+  const bodyRadius = Math.min(.60, boss.hurt.radius * boss.scale * .28);
+  // The front edge of the crescent is at finisherRun(). Sweep that edge
+  // between ticks without extending it ahead of the visible wave.
+  if (travel >= finisherRun(frame - 1) - bodyRadius &&
+      travel <= finisherRun(frame) + bodyRadius &&
+      Math.abs(cross) <= FINISHER.width + bodyRadius) {
     wave.struck = true;
+    wave.contact = { position: boss.pos.clone(), frame };
     strikeUltimate(cast, FINISHER);
   }
 }
@@ -1226,7 +1325,6 @@ function startPlayerAttack(state, id) {
 }
 
 function playerTick() {
-  if (player.flashTimer > 0) player.flashTimer--;
   if (player.state === 'dead') { player.frame++; return; }
   if (grabSequence) { player.frame++; return; }
   if (player.iframe > 0) player.iframe--;
@@ -1493,15 +1591,18 @@ function capturePlayer() {
   player.speed = 0;
   clearBufferedInput();
   hitstop(3);
-  shake(0.08);
+  cameraImpact(direction,IMPACT.guard.shake,.13);
 }
 
 function grabImpact(damage, strength) {
   player.hp = Math.max(0, player.hp - damage);
-  flash(player);
-  shake(strength);
+  const direction = grabSequence.direction;
   const center = player.pos.clone();
-  vfx.hit(boss, player, { center, radius: 0.3, yMin: center.y + 0.50, yMax: center.y + 1.1 });
+  center.y += .8;
+  player.hitAge = 0;
+  player.hitWeight = .95;
+  cameraImpact(direction,strength,.32);
+  vfx.hit(center,direction,.80,true,'thrust');
 }
 
 function beginGrabLanding(sequence) {
@@ -1796,13 +1897,12 @@ function tickBossMeteor(move, targetYaw) {
   updateMeteorSmash(meteorSmash, boss, player, frame,
     () => boss.turnToward(targetYaw, CFG.bossTurnFrames), () => banner('熔岩跃砸', 640, 'notice'));
   if (prior < METEOR.launch && frame >= METEOR.launch) {
-    impactImpulse = Math.max(impactImpulse, .125);
+    cameraImpact(boss.forward,IMPACT.bossSlash.shake,.75);
   }
   if (boss.frame >= totalFrames(move)) finishBossAttack(BOSS_ATTACK_RULES.b_meteor.punishFrames);
 }
 
 function bossTick() {
-  if (boss.flashTimer > 0) boss.flashTimer--;
   if (boss.stunTimer > 0 && boss.state === 'hitstun') boss.stunTimer--;
   if (boss.state === 'dead') { boss.frame++; return; }
   if (player.state === 'dead') return;
@@ -1924,7 +2024,7 @@ function bossTick() {
         // 二阶段：场景推到血月（法阵转红、雾变浓、火盆变血焰）
         STAGE.setPhase(2);
         banner('第二阶段 · 血月', 1800, 'phase');
-        shakeAmt = Math.max(shakeAmt, 0.9);
+        cameraImpact(boss.forward,.43,.90);
         AI.gapFrames = 0;
         return;
       }
@@ -1993,11 +2093,14 @@ let acc = 0;
 let lastTime = performance.now();
 let logicFrame = 0;
 let hitstopFrames = 0;
-let shakeAmt = 0;
-let impactImpulse = 0;
+const contactBlade = new THREE.Line3();
+const contactNear = new THREE.Vector3();
 
 function hitstop(f) { hitstopFrames = Math.max(hitstopFrames, f); }
-function shake(v) { shakeAmt = Math.min(0.3, shakeAmt + v); }
+
+function cameraImpact(direction, strength, lift) {
+  impactCamera.kick(direction,strength,lift);
+}
 
 /** 出招第一帧挂预警；之后特效自己读 actor.frame，判定帧一到自动淡出 */
 function syncTelegraph(a, previousFrame) {
@@ -2097,8 +2200,10 @@ function guardContact(defender, attacker) {
  * 每帧调用。只要角色处于出招状态就持续采样，
  * 挥得快 → 同一时间窗内扫过的路径更长；停下 → 旧采样自然淡出。
  */
-function feedBladeTrail(key, a, dt, swinging = !!a && !a.move?.grab && ATTACK_STATE_RE.test(a.state)) {
+function feedBladeTrail(key, a, dt, enabled = true) {
   if (!vfx.trails || !vfx.trails[key]) return;
+  const swinging = enabled && ATTACK_STATE_RE.test(a.state) && !a.move?.grab && !a.move?.meteor &&
+    (activeStrike(a.move,a.frame+4) || activeStrike(a.move,a.frame-2));
   const group = a && a.binder && a.binder.weaponGroup;
   if (!swinging || !group) { vfx.feedTrail(key, null, null, dt, false); return; }
 
@@ -2121,7 +2226,7 @@ function tick() {
   if (CFG.paused) return;
   player.rememberVisualFrame();
   boss.rememberVisualFrame();
-  if (hitstopFrames > 0) { hitstopFrames--; shakeAmt *= 0.75; return; }
+  if (hitstopFrames > 0) { hitstopFrames--; return; }
 
   logicFrame++;
 
@@ -2129,6 +2234,8 @@ function tick() {
   const previousBossFrame = boss.frame;
   playerTick();
   bossTick();
+  player.stepHitSlide();
+  boss.stepHitSlide();
   advanceGrab();
 
   // Resolve the cut before the enemy's strike. A landed cut cancels that attack.
@@ -2137,9 +2244,9 @@ function tick() {
   resolveHit(player, boss, activeHitbox(player));
   const bossHit = activeHitbox(boss);
   if (bossHit && boss.move.meteor) {
-    impactImpulse = Math.max(impactImpulse, .64);
+    cameraImpact(contactDirection(boss,player,bossHit.center),IMPACT.meteor.shake,.90);
     bossSmashEffect.impact(bossHit.center, VFX_CFG.enabled ? VFX_CFG.intensity : 0);
-    hitstop(4);
+    hitstop(Math.round(HITSTOP_HEAVY()*.50));
   }
   resolveHit(boss, player, bossHit);
   if (meteorSmash && (boss.actionSequence !== meteorSmash.ownerAction || player.state === 'dead')) {
@@ -2367,15 +2474,9 @@ function updateCamera(dtReal, alpha = 1) {
     aimZ = camPos.z + Math.cos(yaw) * boom;
   }
 
-  const shakeVec = new THREE.Vector3(
-    (Math.random() - 0.5) * (shakeAmt + impactImpulse),
-    (Math.random() - 0.5) * (shakeAmt + impactImpulse),
-    (Math.random() - 0.5) * (shakeAmt + impactImpulse)
-  );
-  camera.position.copy(camPos).add(shakeVec);
-  camera.lookAt(aimX, camTarget.y, aimZ);
-  shakeAmt *= 0.86;
-  impactImpulse *= Math.exp(-dtReal * 8.4);
+  const offset = impactCamera.sample(dtReal,THREE.MathUtils.clamp(CFG.camShake/.06,0,2));
+  camera.position.copy(camPos).add(offset);
+  camera.lookAt(aimX+offset.x*.36,camTarget.y+offset.y*.22,aimZ+offset.z*.36);
 }
 
 /** 把当前状态翻译成姿态并套到骨架上 */
@@ -2718,13 +2819,14 @@ let lastPoseLogicFrame = 0;
 function render(dtReal, dodgeScale) {
   updateStage(performance.now() / 1000, camera);
   // 美术模型动画（灰盒可不接）
-  const animDt = CFG.paused ? 0 : dtReal * dodgeScale;   // 暂停时冻结动画，方便逐帧检查
+  const animDt = CFG.paused || hitstopFrames > 0 ? 0 : dtReal * dodgeScale;
   restoreGrabJoints();
   const cast = player.state === 'ultimate' ? ultimateCast : null;
   const ultimateAlpha = hitstopFrames > 0 || CFG.paused ? 1 : THREE.MathUtils.clamp(acc / STEP,0,1);
   const castFrame = cast ? THREE.MathUtils.lerp(cast.previous, player.frame, ultimateAlpha) : 0;
-  player.syncMesh(cast?.motion ? ultimateAlpha : dodgeVisualAlpha);
-  boss.syncMesh(meteorSmash ? ultimateAlpha : dodgeVisualAlpha);
+  const dtFeedback = CFG.paused ? 0 : dtReal;
+  player.syncMesh(cast?.motion ? ultimateAlpha : dodgeVisualAlpha,dtFeedback);
+  boss.syncMesh(meteorSmash ? ultimateAlpha : dodgeVisualAlpha,dtFeedback);
   const getUp = grabSequence?.phase === 'wall' ? grabGetUpProgress(grabSequence) : 0;
   if (combatReady) {
     // 擒拿的所有姿态都跟随战斗帧，慢放或命中冻结时和判定保持同步。
@@ -2784,10 +2886,11 @@ function render(dtReal, dodgeScale) {
   if (boss.move?.grab) boss.binder?.groundPose(boss, 0);
   poseGrabVictim(player, grabSequence, grabHand);
 
-  // 特效推进：顿帧时冻结（打在铁上那一下要「停」住）
-  dodgeEffect.update(CFG.paused ? 0 : dtReal, player);
+  // Blade motion follows combat time. Sparks and contact flashes continue
+  // through the freeze so the hit still has motion on the locked pose.
+  dodgeEffect.update(dtFeedback, player);
   const dtVfx = CFG.paused || hitstopFrames > 0 ? 0 : dtReal * CFG.timeScale * dodgeScale;
-  vfx.update(dtVfx);
+  vfx.update(dtVfx,dtFeedback);
   const intensity = VFX_CFG.enabled ? VFX_CFG.intensity : 0;
   if (cast || releasedUltimate) {
     const blade = cast && (player.binder?.weaponGroup ?? (!player.binder ? player.mesh.weapon : null));
@@ -3088,7 +3191,9 @@ const fDebug = gui.addFolder('调试');
 fDebug.add(CFG, 'showHitbox').name('判定框 (F1)').listen();
 fDebug.add(CFG, 'timeScale', 0.05, 2, 0.05).name('时间倍速 (F2)').listen();
 fDebug.add(CFG, 'paused').name('暂停 (F3)').listen();
-fDebug.add(CFG, 'hitstop', 0, 16, 1).name('命中冻结帧');
+fDebug.add(CFG, 'hitstop', 0, 16, 1).name('轻击顿帧基准');
+fDebug.add(CFG, 'hitstopHeavy', 0, 16, 1).name('重击顿帧基准');
+fDebug.add(CFG, 'camShake', 0, .12, .005).name('命中镜头震动');
 fDebug.add({ fn: resetFight }, 'fn').name('重开 (R)');
 fDebug.add({ fn: downloadJSON }, 'fn').name('导出帧表 (P)');
 fDebug.add({ fn: () => openGrabMode(true) }, 'fn').name('打开擒拿调试');
@@ -3301,7 +3406,7 @@ function resetFight() {
   rng = mulberry32(0xC0FFEE);
   logicFrame = 0;
   hitstopFrames = 0;
-  shakeAmt = 0;
+  impactCamera.clear();
   vfx.clear();
   dodgeEffect.clear();
   perfectDodgeFrame = null;
@@ -3312,7 +3417,6 @@ function resetFight() {
   releasedUltimate = null;
   ultimateEffect.clear();
   meteorSmash = null;
-  impactImpulse = 0;
   bossSmashEffect.clear();
   boss.stunMarks = [];
   boss.armorUntil = -1;
@@ -3351,7 +3455,10 @@ function startGame() {
     if (bossIntro) document.body.classList.add('boss-intro');
   }
   lastTime = performance.now();
-  if (fromTitle) canvas.focus({ preventScroll: true });
+  if (fromTitle) {
+    if (navigator.userActivation.hasBeenActive) vfx.guardImpact.unlockAudio();
+    canvas.focus({ preventScroll: true });
+  }
   if (!bossIntro) banner(frameIssues.length ? `帧数据越界 ${frameIssues.length} 项 · 见 console` : '点击战斗画面捕获鼠标', 1800);
 }
 
@@ -3371,6 +3478,7 @@ function returnToTitle() {
 }
 
 function completeLoading() {
+  ultimateEffect.prepare(player.binder?.root ?? player.mesh.group, renderer);
   const target = renderer.getRenderTarget();
   renderer.setRenderTarget(composer.readBuffer);
   try {

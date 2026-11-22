@@ -5,10 +5,10 @@
 //  不参与任何战斗逻辑，删掉整个文件游戏照样能跑。
 //
 //  · swingFromActor(actor, move)  刀光弧：判定帧第一帧开火，扫过 active 帧
-//  · hit(attacker, defender, hb)  命中火花 + 闪光（金属感，暖色）
+//  · hit(point, direction, ...)  按接触点和挥击方向放出闪光与火星
 //  · guard(actor)                 金色星芒与飞溅火星
 //  · parry(actor)                 弹反：强化星芒、拖尾、烟尘与折射
-//  · update(dt)                   真实秒推进；命中冻结时由调用方传 0 来冻住
+//  · update(dt, dtFeedback)       刀光跟随战斗时间，接触火花在顿帧中继续飞散
 //
 //  调参：VFX_CFG 已挂到 lil-gui「近战特效」文件夹
 // ─────────────────────────────────────────────────────────────
@@ -385,28 +385,18 @@ export class MeleeVFX {
   }
 
   // ── 命中火花 ───────────────────────────────────────────────
-  hit(attacker, defender, hitbox) {
-    if (!VFX_CFG.enabled || !hitbox || !defender) return;
+  hit(point, direction, weight, boss, swing) {
+    if (!VFX_CFG.enabled || VFX_CFG.intensity <= 0) return;
+    const size = .68+weight*.61;
+    const color = boss ? 0xffae77 : 0xd6bdff;
+    const vertical = swing === 'vertical';
+    const spray = direction.clone().setY(vertical ? .54 : .20);
 
-    // 接触点：判定圆朝受击者方向推一点，避免火花在身体里
-    const p = new THREE.Vector3().copy(hitbox.center);
-    p.y = clamp((hitbox.yMin + hitbox.yMax) * 0.5, 0.35, 2.6);
-
-    const dx = defender.pos.x - p.x;
-    const dz = defender.pos.z - p.z;
-    const len = Math.hypot(dx, dz) || 1;
-    const nx = dx / len, nz = dz / len;
-    p.x += nx * hitbox.radius * 0.5;
-    p.z += nz * hitbox.radius * 0.5;
-
-    const size = clamp((defender.scale ?? 1) * 0.95, 0.85, 2.6);
-    const heavy = (attacker?.move?.damage ?? 0) >= 200;
-
-    this._burst(p, { size, heavy, dir: new THREE.Vector3(nx, 0.2, nz) });
-    this._flash(p, {
-      size: size * (heavy ? 1.55 : 1.0),
-      color: 0xfff1d6,
-      life: heavy ? 0.12 : 0.08,
+    this._burst(point, { size, weight, color, dir: spray });
+    this._flash(point, {
+      size, color: boss ? 0xffe0bd : 0xefe3ff,
+      life: .063+weight*.063,
+      rotation: vertical ? -.94 : swing === 'thrust' ? -.06 : .49,
     });
   }
 
@@ -420,7 +410,9 @@ export class MeleeVFX {
 
   _clash(actor, attacker, tier, contact) {
     if (!actor || !VFX_CFG.enabled || VFX_CFG.intensity <= 0) return;
-    this.effects.push(this.guardImpact.burst(actor, tier, this.getCamera(), VFX_CFG.intensity, attacker, contact));
+    const effect = this.guardImpact.burst(actor,tier,this.getCamera(),VFX_CFG.intensity,attacker,contact);
+    effect.realTime = true;
+    this.effects.push(effect);
   }
 
   // ── 生命周期 ───────────────────────────────────────────────
@@ -591,9 +583,11 @@ export class MeleeVFX {
     });
     return found;
   }
-  update(dt) {     if (!(dt > 0)) return;
+  update(dt, dtFeedback = dt) {
     for (let i = this.effects.length - 1; i >= 0; i--) {
-      if (!this.effects[i].update(dt)) this.effects.splice(i, 1);
+      const effect = this.effects[i];
+      const step = effect.realTime ? dtFeedback : dt;
+      if (step > 0 && !effect.update(step)) this.effects.splice(i,1);
     }
   }
 
@@ -616,9 +610,8 @@ export class MeleeVFX {
   /** 一簇火星：Points + 逐粒子速度/重力 */
   _burst(point, opts = {}) {
     const size = opts.size ?? 1;
-    const heavy = !!opts.heavy;
-    const baseCount = opts.count ?? VFX_CFG.sparkCount;
-    const count = Math.max(0, Math.round(baseCount * (heavy ? 1.6 : 1) * clamp(VFX_CFG.intensity, 0, 2)));
+    const weight = opts.weight ?? .5;
+    const count = Math.max(0,Math.round(VFX_CFG.sparkCount*(.36+weight*.94)*clamp(VFX_CFG.intensity,0,2)));
     if (count === 0) return;
 
     const dir = (opts.dir ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
@@ -627,6 +620,8 @@ export class MeleeVFX {
 
     const pos = new Float32Array(count * 3);
     const col = new Float32Array(count * 3);
+    const streakPositions = new Float32Array(count * 6);
+    const streakColors = new Float32Array(count * 6);
     const vel = [];
 
     for (let i = 0; i < count; i++) {
@@ -636,11 +631,15 @@ export class MeleeVFX {
 
       const v = new THREE.Vector3(rand(-1, 1), rand(-0.15, 0.95), rand(-1, 1))
         .normalize().addScaledVector(dir, 1.0).normalize();
-      const speed = rand(1.6, 5.4) * size * (heavy ? 1.35 : 1);
+      const speed = rand(2.3,7.1) * (.73+weight*.70);
       vel.push(v.multiplyScalar(speed));
 
       const c = base.clone().lerp(hot, rand(0, 0.65));
-      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      c.toArray(col,i*3);
+      c.toArray(streakColors,i*6);
+      c.multiplyScalar(.12).toArray(streakColors,i*6+3);
+      point.toArray(streakPositions,i*6);
+      point.toArray(streakPositions,i*6+3);
     }
 
     const geo = new THREE.BufferGeometry();
@@ -648,7 +647,7 @@ export class MeleeVFX {
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
 
     const mat = new THREE.PointsMaterial({
-      size: 0.085 * size * (heavy ? 1.35 : 1),
+      size: 0.057 * size,
       map: tex().spark ?? null,
       vertexColors: true,
       transparent: true,
@@ -660,32 +659,57 @@ export class MeleeVFX {
     const pts = guardFromAO(new THREE.Points(geo, mat), mat);
     pts.frustumCulled = false;
     pts.renderOrder = 4;
-    this.scene.add(pts);
+    pts.name = 'melee-contact-sparks';
 
-    const life = rand(0.20, 0.36);
+    const streakGeometry = new THREE.BufferGeometry();
+    streakGeometry.setAttribute('position',new THREE.BufferAttribute(streakPositions,3).setUsage(THREE.DynamicDrawUsage));
+    streakGeometry.setAttribute('color',new THREE.BufferAttribute(streakColors,3));
+    const streakMaterial = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const streaks = guardFromAO(new THREE.LineSegments(streakGeometry,streakMaterial),streakMaterial);
+    streaks.frustumCulled = false;
+    streaks.name = 'melee-contact-streaks';
+    streaks.renderOrder = 4;
+    this.scene.add(pts,streaks);
+
+    const life = .19+weight*.14;
     let age = 0;
-
-    const effect = {
+    const dispose = () => {
+      this.scene.remove(pts,streaks);
+      geo.dispose();
+      mat.dispose();
+      streakGeometry.dispose();
+      streakMaterial.dispose();
+    };
+    this.effects.push({
+      realTime: true,
       update: (dt) => {
         age += dt;
-        const t = clamp(age / life, 0, 1);
-        const arr = geo.attributes.position.array;
-        for (let i = 0; i < count; i++) {
+        if (age >= life) { dispose(); return false; }
+        const t = age/life;
+        const tail = Math.min(age,(.021+weight*.025)*(1-t));
+        for (let i=0;i<count;i++) {
           const v = vel[i];
-          v.y -= 13.5 * dt;
-          v.multiplyScalar(1 - 1.8 * dt);
-          arr[i * 3] += v.x * dt;
-          arr[i * 3 + 1] += v.y * dt;
-          arr[i * 3 + 2] += v.z * dt;
+          v.y -= 13.5*dt;
+          v.multiplyScalar(Math.exp(-4.2*dt));
+          const a=i*3, b=i*6;
+          pos[a] += v.x*dt;
+          pos[a+1] = Math.max(.04,pos[a+1]+v.y*dt);
+          pos[a+2] += v.z*dt;
+          streakPositions[b] = pos[a];
+          streakPositions[b+1] = pos[a+1];
+          streakPositions[b+2] = pos[a+2];
+          streakPositions[b+3] = pos[a]-v.x*tail;
+          streakPositions[b+4] = Math.max(.04,pos[a+1]-v.y*tail);
+          streakPositions[b+5] = pos[a+2]-v.z*tail;
         }
-        geo.attributes.position.needsUpdate = true;
-        mat.opacity = Math.pow(1 - t, 1.4);
-        if (t >= 1) { this._drop(pts); geo.dispose(); mat.dispose(); return false; }
+        geo.attributes.position.needsUpdate = streakGeometry.attributes.position.needsUpdate = true;
+        mat.opacity = streakMaterial.opacity = (1-t)**1.7;
         return true;
       },
-      dispose: () => { this._drop(pts); geo.dispose(); mat.dispose(); },
-    };
-    this.effects.push(effect);
+      dispose,
+    });
   }
 
   /** 命中闪光：一个加色 Sprite，快速放大后消失 */
@@ -699,19 +723,23 @@ export class MeleeVFX {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
-    const sp = new THREE.Sprite(mat);
+    mat.rotation = opts.rotation ?? 0;
+    mat.opacity = clamp(VFX_CFG.intensity,0,2);
+    const sp = guardFromAO(new THREE.Sprite(mat),mat);
+    sp.name = 'melee-contact-flash';
     sp.position.copy(point);
-    sp.scale.setScalar(0.12 * size);
+    sp.scale.set(.93*size,.51*size,1);
     sp.renderOrder = 5;
     this.scene.add(sp);
 
     let age = 0;
     const effect = {
+      realTime: true,
       update: (dt) => {
         age += dt;
         const t = clamp(age / life, 0, 1);
-        sp.scale.setScalar((0.45 + 1.65 * t) * size);
-        mat.opacity = Math.pow(1 - t, 2.2) * clamp(VFX_CFG.intensity, 0, 2);
+        sp.scale.set((.93+.77*t)*size,(.51+.35*t)*size,1);
+        mat.opacity = (1-t)**1.65 * clamp(VFX_CFG.intensity,0,2);
         if (t >= 1) { this._drop(sp); mat.dispose(); return false; }
         return true;
       },

@@ -17,7 +17,7 @@ export const CFG = {
   walkSpeed: 2.0,
 
   // 战斗全局
-  hitstop: 5,              // 命中冻结帧（按伤害分级见 hitstopByDamage）
+  hitstop: 5,              // 轻击与连斩的顿帧基准
   hitstopHeavy: 8,
   camShake: 0.06,
 

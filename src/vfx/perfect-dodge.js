@@ -5,11 +5,15 @@ import { guardFromAO } from './ao-guard.js';
 const { clamp, lerp, smoothstep } = THREE.MathUtils;
 const cyan = new THREE.Color(0x3bb8f2);
 
-function echoMaterial() {
+function echoMaterial({ inner = [.02,.24,.60], rim = [.27,.83,1.] } = {}) {
   return new THREE.ShaderMaterial({
     precision: 'highp', transparent: true, depthWrite: false, toneMapped: false,
     blending: THREE.AdditiveBlending,
-    uniforms: { fade: { value: 1 }, time: { value: 0 } },
+    uniforms: {
+      fade: { value: 1 }, time: { value: 0 },
+      innerColor: { value: new THREE.Vector3(...inner) },
+      rimColor: { value: new THREE.Vector3(...rim) },
+    },
     vertexShader: `
       #include <common>
       #include <skinning_pars_vertex>
@@ -26,20 +30,21 @@ function echoMaterial() {
       }`,
     fragmentShader: `
       uniform float fade, time;
+      uniform vec3 innerColor, rimColor;
       varying vec3 eye, surface;
       void main() {
         float edge = pow(1.0 - abs(dot(normalize(eye),normalize(surface))),2.2);
         float fibers = sin(gl_FragCoord.y * .19 + time * 20.) * .5 + .5;
-        vec3 color = mix(vec3(.02,.24,.60),vec3(.27,.83,1.),edge);
+        vec3 color = mix(innerColor,rimColor,edge);
         gl_FragColor = vec4(color,fade * (.22 + edge * .62) * (.78 + fibers * .22));
       }`,
   });
 }
 
-function prepareEcho(source, renderer) {
+export function preparePoseEcho(source, renderer, name = 'perfect-dodge-afterimage', palette) {
   const meshes = new THREE.Group();
-  meshes.name = 'perfect-dodge-afterimage';
-  const material = echoMaterial();
+  meshes.name = name;
+  const material = echoMaterial(palette);
   const skeletons = new Map();
   const objects = [];
   function add(node) {
@@ -194,7 +199,7 @@ export class PerfectDodgeEffect {
     this.clear();
     for (const echo of this.pool) echo.dispose();
     this.source = source;
-    this.pool = Array.from({ length: 3 }, () => prepareEcho(source, renderer));
+    this.pool = Array.from({ length: 3 }, () => preparePoseEcho(source, renderer));
     const previousTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(target);
     try {

@@ -26,11 +26,13 @@
     <div class="portrait" aria-hidden="true"><span></span></div>
     <div class="player-meters">
       <div class="player-heading"><strong>玩家</strong><span id="hudStatus" hidden></span></div>
-      <div class="meter player-life" id="playerLife" role="meter" aria-label="玩家生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span></div>
+      <div class="meter-line life-line">
+        <span class="life-label">生命</span>
+        <div class="meter player-life" id="playerLife" role="meter" aria-label="玩家生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span><output id="hudHealth" class="player-value"></output></div>
+      </div>
       <div class="meter-line">
         <span class="poise-label" title="轻击命中回韧，重击与持续格挡消耗韧性。弹反或完美闪避后可接反击。">韧性</span>
         <div class="meter player-poise" id="playerPoise" role="meter" aria-label="玩家韧性" aria-valuemin="0"><span class="meter-fill"></span></div>
-        <span class="player-value" id="hudHealth"></span>
       </div>
       <div class="meter-line ultimate-line">
         <span class="ultimate-label">大招</span>
@@ -47,11 +49,13 @@
   </section>
 
   <section class="boss-hud" id="bossHud" aria-label="首领">
+    <img class="boss-sigil" src="assets/ui/combat-boss-sigil.webp" alt="">
     <div class="boss-heading">
       <strong>首领</strong>
       <span class="boss-phase" id="hudPhase"></span>
     </div>
     <div class="boss-rule">
+      <i class="boss-jewel" aria-hidden="true"></i>
       <div class="meter boss-life" id="bossLife" role="meter" aria-label="首领生命" aria-valuemin="0"><span class="meter-trail"></span><span class="meter-fill"></span></div>
     </div>
     <div class="meter boss-poise" id="bossPoise" role="meter" aria-label="首领韧性" aria-valuemin="0"><span class="meter-fill"></span></div>
@@ -62,14 +66,14 @@
 <div id="help" aria-label="战斗操作">
   <span><kbd data-binding="fwd left back right">W A S D</kbd>移动</span>
   <span><kbd data-binding="roll">Shift / Space</kbd>翻滚</span>
-  <span><kbd data-binding="light">左键</kbd>轻击回韧</span>
-  <span><kbd data-binding="heavy">F</kbd>重击削韧</span>
+  <span><kbd data-binding="light">左键</kbd>轻击 / 回韧</span>
+  <span><kbd data-binding="heavy">F</kbd>重击 / 削韧</span>
   <span><kbd data-binding="block">右键</kbd>格挡 / 弹反</span>
   <span><kbd data-binding="lock">中键</kbd>锁定</span>
 </div>
 <div class="system-hud">
   <span class="restart-hint"><kbd>R</kbd>重开</span>
-  <button id="gear" type="button" aria-label="打开设置" aria-haspopup="dialog" title="设置 (Esc)"><span class="gear-mark" aria-hidden="true"></span><span>设置</span><kbd>Esc</kbd></button>
+  <button id="gear" type="button" aria-label="打开设置" aria-haspopup="dialog" title="设置 (Esc)"><span class="gear-mark" aria-hidden="true">⚙</span><span>设置</span><kbd>Esc</kbd></button>
 </div>
 <div id="banner" role="status" aria-live="polite">
   <div class="banner-inner"><span id="bannerText"></span><span id="bannerHint" hidden><kbd>R</kbd>重新挑战</span></div>

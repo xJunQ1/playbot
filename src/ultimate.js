@@ -4,7 +4,7 @@ const SOURCE_END = 438;
 const COMBO_TIMING = [[115, 115], [152, 192], [198, 265], [225, 302]];
 const RETIME_OFFSET = 302 - 225;
 export const ULTIMATE_STAGGER = 53;
-export const FINISHER = { start: 329 - RETIME_OFFSET, hit: 338 - RETIME_OFFSET, end: 353 - RETIME_OFFSET, damage: 370, distance: 11.4, duration: 29 };
+export const FINISHER = { start: 329 - RETIME_OFFSET, hit: 338 - RETIME_OFFSET, end: 353 - RETIME_OFFSET, damage: 370, distance: 15.8, width: 1.10, duration: 37 };
 export const ULTIMATE_CAMERA_RETURN = { start: FINISHER.hit + 1, end: FINISHER.hit + 14 };
 export const ULTIMATE_CANCEL_FROM = FINISHER.end + 6;
 export const ULTIMATE_END = FINISHER.end + 14;
@@ -103,13 +103,22 @@ export function ultimateFallbackPose(binder, frame) {
   return { key, sampleTime: p * clip.duration, fade: .105, groundFeet: true };
 }
 
-export function startFinisher(cast, start) {
+export function startFinisher(cast, start, target) {
   const { motion, side, forward } = cast;
   const direction = motion ? forward.clone().multiplyScalar(motion.release[1])
     .addScaledVector(side, motion.release[0]).normalize() : forward.clone();
-  const origin = motion ? start.clone().addScaledVector(side, motion.waveStart[0] * .72)
-    .addScaledVector(forward, motion.waveStart[1] * .72) : start.clone().addScaledVector(forward, .9);
-  cast.wave = { origin, direction, struck: false };
+  const origin = start.clone();
+  const aim = target?.clone().sub(start).setY(0);
+  if (aim && aim.lengthSq() > .0001) direction.copy(aim).normalize();
+  const lead = motion ? motion.waveStart[1] * .72 : .9;
+  // Keep the launch point behind the target, even at point-blank range.
+  origin.addScaledVector(direction, aim ? Math.min(lead, Math.max(0, aim.length() - .95)) : lead);
+  if (motion) {
+    const tangent = new THREE.Vector3(direction.z, 0, -direction.x);
+    origin.addScaledVector(tangent, motion.waveStart[0] * .72);
+  }
+  if (aim && aim.copy(target).sub(origin).setY(0).lengthSq() > .0001) direction.copy(aim).normalize();
+  cast.wave = { origin, direction, struck: false, contact: null };
 }
 
 export function finisherRun(frame) {
