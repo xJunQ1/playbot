@@ -4,7 +4,7 @@ const SOURCE_END = 438;
 const COMBO_TIMING = [[115, 115], [152, 192], [198, 265], [225, 302]];
 const RETIME_OFFSET = 302 - 225;
 export const ULTIMATE_STAGGER = 53;
-export const FINISHER = { start: 329 - RETIME_OFFSET, hit: 338 - RETIME_OFFSET, end: 353 - RETIME_OFFSET, damage: 370, distance: 15.8, width: 1.10, duration: 37 };
+export const FINISHER = { start: 329 - RETIME_OFFSET, hit: 338 - RETIME_OFFSET, end: 353 - RETIME_OFFSET, damage: 370, distance: 15.8, width: 1.10, duration: 37, ease: 1.18, fireTail: 72 };
 export const ULTIMATE_CAMERA_RETURN = { start: FINISHER.hit + 1, end: FINISHER.hit + 14 };
 export const ULTIMATE_CANCEL_FROM = FINISHER.end + 6;
 export const ULTIMATE_END = FINISHER.end + 14;
@@ -123,5 +123,5 @@ export function startFinisher(cast, start, target) {
 
 export function finisherRun(frame) {
   const t = THREE.MathUtils.clamp((frame - FINISHER.hit) / FINISHER.duration, 0, 1);
-  return FINISHER.distance * (1 - (1 - t) ** 1.18);
+  return FINISHER.distance * (1 - (1 - t) ** FINISHER.ease);
 }

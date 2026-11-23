@@ -340,13 +340,13 @@ function makeBladeArc(root, cut, index) {
   };
 }
 
-// The forward belly stays at z=0, on the same path as the combat sweep.
+// The cutting edge lies in the vertical flight plane. Only the crystal's
+// thickness extends sideways, equally to either side of the hit path.
 function finisherProfile(u, v, point, side = 0) {
   const arc=Math.max(0,Math.sin(Math.PI*u**.89));
   const depth=-(1-arc**.91)*(1.95+u*1.58) - 1.85*(1-v)*arc**1.28;
-  const bevel=side*.29*crystalDepth(v)*arc**.78;
-  return point.set(depth*.53+(u-.44)*.38+bevel*.88,
-    .068+u*3.12,depth*.93-bevel*.47);
+  const bevel=side*.34*crystalDepth(v)*arc**.78;
+  return point.set(bevel,.068+u*3.12,depth*.93);
 }
 
 function makeFinisher(root) {
@@ -377,10 +377,10 @@ function makeFinisherWake(root, index) {
   const point = new THREE.Vector3();
   for (let i=0;i<position.count;i++) {
     const u=uv.getX(i), v=uv.getY(i);
-    finisherProfile(u,.38+v*.54,point,index ? -1 : 1);
-    point.x += index ? -.34 : .18;
-    point.z -= index ? .95 : .29;
-    position.setXYZ(i,point.x,point.y*(index ? .86 : 1.02),point.z);
+    finisherProfile(u,.32+v*.48,point);
+    point.x += (index ? -1 : 1)*(.19+.22*Math.sin(Math.PI*u));
+    point.z -= .52+.52*(1-u);
+    position.setXYZ(i,point.x,point.y*.91,point.z);
   }
   const material=lightMaterial(uniforms,`
     varying vec2 vUv;
@@ -397,38 +397,178 @@ function makeFinisherWake(root, index) {
       float fade=smoothstep(.02,.19,u)*(1.-smoothstep(.82,1.,u));
       float flow=noise(vec2(u*16.+age*1.8,v*4.));
       float body=bell((v-.62+(flow-.5)*.44)*5.);
-      float edge=bell((v-.76+(flow-.5)*.20)*28.);
-      float tear=smoothstep(.34,.69,noise(vec2(u*26.-v*2.,v*9.+age)));
-      float alpha=power*fade*tear*(1.-smoothstep(.86,1.,v));
-      gl_FragColor=vec4(vec3(.27,.055,.83)*(body*.86+edge*.65),alpha);
+      float tear=smoothstep(.30,.72,noise(vec2(u*26.-v*2.,v*9.+age)));
+      float alpha=power*fade*tear*(1.-smoothstep(.80,1.,v));
+      gl_FragColor=vec4(vec3(.20,.044,.69)*body,alpha);
     }
   `);
   return {mesh:effectMesh(root,'ultimate-finisher-wake-'+index,geometry,material,15),uniforms};
 }
 
-function makeFinisherGroundLight(root) {
-  const uniforms = { power: { value: 0 } };
-  const geometry = new THREE.PlaneGeometry(3.6,5.2).rotateX(-Math.PI/2);
-  const material=lightMaterial(uniforms,`
-    varying vec2 vUv;
+function makeFinisherGroundFire(root, arenaRadius) {
+  const group = new THREE.Group();
+  group.name = 'ultimate-finisher-ground-fire';
+  root.add(group);
+  const length = FINISHER.distance;
+  const uniforms = {
+    power: { value: 0 }, time: { value: 0 }, extent: { value: 0 },
+    flight: { value: FINISHER.duration/60 }, inverseEase: { value: 1/FINISHER.ease },
+    lifetime: { value: FINISHER.fireTail/60 }, arenaRadius: { value: arenaRadius },
+  };
+  const floor = new THREE.PlaneGeometry(2.55,length).rotateX(-Math.PI/2).translate(0,.043,length/2);
+  const vertex = `
+    varying vec2 vUv, groundPoint;
     void main() {
       vUv=uv;
+      groundPoint=(modelMatrix*vec4(position,1.)).xz;
       gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);
     }
-  `,`
-    varying vec2 vUv;
-    uniform float power;
+  `;
+  const fire = `
     ${NOISE}
+    uniform float power,time,extent,flight,inverseEase,lifetime,arenaRadius;
+    varying vec2 vUv, groundPoint;
+    float burnAge(float s) {
+      float arrival=(1.-pow(clamp(1.-s,0.,1.),inverseEase))*flight;
+      return time-arrival;
+    }
+    float wake(float s) {
+      float age=burnAge(s);
+      float ignite=smoothstep(-.012,.05,age);
+      float cool=1.-smoothstep(lifetime*.59,lifetime,age);
+      float onStage=1.-smoothstep(arenaRadius-.60,arenaRadius,length(groundPoint));
+      return onStage*ignite*cool*smoothstep(-.004,.027,extent-s)*smoothstep(0.,.032,s);
+    }
+  `;
+  const glow = lightMaterial(uniforms,vertex,`
+    ${fire}
     void main() {
-      vec2 p=vUv*2.-1.;
-      float envelope=1.-smoothstep(.17,1.,length(p));
-      float streak=bell((p.x-(noise(p*vec2(2.,9.))-.5)*.30)*11.);
-      float glow=envelope*envelope*(bell(p.x*4.)*.43+streak*.83);
-      gl_FragColor=vec4(vec3(.43,.061,.80),glow*power);
+      float s=1.-vUv.y, x=vUv.x*2.-1.;
+      float heat=exp(-8.*max(0.,burnAge(s)));
+      float flicker=noise(vec2(s*92.,x*11.+time*2.));
+      float crown=noise(vec2(s*157.,x*21.));
+      float crack=bell((flicker-.48)*20.)*smoothstep(.26,.67,crown);
+      float ember=pow(crown,7.);
+      float meander=x+(noise(vec2(s*23.,2.6))-.50)*.42;
+      float pool=bell(meander*3.7)*(1.-smoothstep(.54,1.,abs(x)));
+      vec3 dark=vec3(.24,.018,.59);
+      vec3 hot=vec3(.79,.24,1.21);
+      gl_FragColor=vec4((dark*(.45+flicker*.52)+hot*(heat*.29+crack*.27+ember*.39))*pool,power*wake(s));
     }
   `);
-  return {mesh:effectMesh(root,'ultimate-finisher-floor-light',geometry,material,13),uniforms};
+  effectMesh(group,'ultimate-finisher-fire-base',floor,glow,13).visible = true;
+
+  const flameMaterial = lightMaterial(uniforms,`
+    attribute vec3 flameOrigin, flameStyle;
+    varying vec2 vUv, groundPoint;
+    varying float seed, trail, flicker;
+    uniform float time;
+    void main() {
+      vUv=uv;
+      seed=flameStyle.z;
+      trail=flameOrigin.y;
+      flicker=fract(time*(1.7+seed*1.6)+seed*11.7);
+      vec3 base=vec3(flameOrigin.x,.047,flameOrigin.z);
+      groundPoint=(modelMatrix*vec4(base,1.)).xz;
+      float height=uv.y*flameStyle.y*(.67+.33*sin(flicker*3.141593));
+      vec4 view=modelViewMatrix*vec4(base+vec3(0.,height,-.29*uv.y*uv.y),1.);
+      view.x+=position.x*flameStyle.x;
+      gl_Position=projectionMatrix*view;
+    }
+  `,`
+    ${fire}
+    varying float seed,trail,flicker;
+    void main() {
+      float h=vUv.y;
+      float x=vUv.x*2.-1.;
+      float rise=h*4.6-time*(3.4+seed)+seed*17.;
+      float curl=sin(h*5.8+time*5.+seed*16.);
+      float fold=noise(vec2(rise,x*2.8+seed*4.));
+      float twist=(curl*.38+(fold-.5)*.48)*h;
+      float tip=.72+.21*noise(vec2(rise*.6,seed*20.));
+      float taper=pow(clamp((tip-h)/tip,0.,1.),.69);
+      float mainTongue=1.-smoothstep(taper*.32,taper*.73+.031,abs(x-twist));
+      float sideTip=.53+seed*.18;
+      float sideWidth=pow(clamp((sideTip-h)/sideTip,0.,1.),.76)*.43;
+      float sideCenter=.40*sign(seed-.5)+twist*.8;
+      float sideTongue=1.-smoothstep(sideWidth*.33,sideWidth+.028,abs(x-sideCenter));
+      sideTongue*=1.-smoothstep(sideTip-.12,sideTip,h);
+      float base=smoothstep(.0,.15,h);
+      float tipFade=1.-smoothstep(tip-.15,tip,h);
+      float tongue=max(mainTongue*tipFade,sideTongue*.55);
+      float density=noise(vec2(rise*2.7,x*7.1+seed));
+      float heat=exp(-7.0*max(0.,burnAge(trail)));
+      float ember=bell((h-.18)*8.5)*bell((x-twist)*4.4);
+      float vein=bell((x-twist)*8.2)*bell((h-.44)*3.3)*density;
+      vec3 color=mix(vec3(.19,.009,.53),vec3(.51,.058,1.03),density);
+      color+=vec3(.78,.28,.98)*(ember*(.39+.58*heat)+vein*.32);
+      float edgeFade=1.-smoothstep(.83,1.,abs(x));
+      float alpha=wake(trail)*base*tongue*edgeFade*(.46+.54*density)*
+        (.57+.43*sin(flicker*3.141593));
+      gl_FragColor=vec4(color,clamp(power*alpha*.64,0.,1.));
+    }
+  `);
+
+  let randomState = 901564;
+  const random = () => (randomState=(Math.imul(randomState,1664525)+1013904223)>>>0)/4294967296;
+  const anchors=[], styles=[];
+  const rows=37;
+  for (let band=0;band<3;band++) {
+    for (let i=0;i<rows;i++) {
+      const s=(i+.16+random()*.72)/rows;
+      const x=(band-1)*(.30+random()*.20)+(random()-.5)*.36;
+      const seed=random();
+      anchors.push(x,s,s*length);
+      styles.push(.35+random()*.58,.42+random()*.83,seed);
+    }
+  }
+  const quad=new THREE.PlaneGeometry(1,1);
+  const flames=new THREE.InstancedBufferGeometry().copy(quad);
+  quad.dispose();
+  flames.setAttribute('flameOrigin',new THREE.InstancedBufferAttribute(new Float32Array(anchors),3));
+  flames.setAttribute('flameStyle',new THREE.InstancedBufferAttribute(new Float32Array(styles),3));
+  flames.instanceCount=anchors.length/3;
+  effectMesh(group,'ultimate-finisher-flame-tongues',flames,flameMaterial,15).visible = true;
+
+  const sparks = [];
+  for (let i=0;i<72;i++) {
+    const s=(i+random())/72;
+    sparks.push((random()-.5)*1.25,random(),s*length);
+  }
+  const sparkGeometry=new THREE.BufferGeometry();
+  sparkGeometry.setAttribute('position',new THREE.Float32BufferAttribute(sparks,3));
+  const sparkMaterial=lightMaterial(uniforms,`
+    uniform float time;
+    varying vec2 vUv, groundPoint;
+    varying float life;
+    void main() {
+      vUv=vec2(0.,position.z/${length.toFixed(2)});
+      life=fract(time*(.89+position.y*.91)+position.y*5.1);
+      vec3 p=vec3(position.x+sin(position.y*23.+life*3.4)*life*.38,
+        .08+life*mix(.45,1.7,position.y),position.z-life*.44);
+      groundPoint=(modelMatrix*vec4(p,1.)).xz;
+      vec4 view=modelViewMatrix*vec4(p,1.);
+      gl_Position=projectionMatrix*view;
+      gl_PointSize=clamp((16.+36.*position.y)/max(1.,-view.z),1.,6.);
+    }
+  `,`
+    ${fire}
+    varying float life;
+    void main() {
+      vec2 p=(gl_PointCoord-.5)*2.;
+      float core=exp(-dot(p,p)*4.7)*(1.-smoothstep(.57,1.,length(p)));
+      gl_FragColor=vec4(vec3(1.0,.52,1.22),core*wake(vUv.y)*power*(1.-life)*.84);
+    }
+  `);
+  const emberCloud=guardFromAO(new THREE.Points(sparkGeometry,sparkMaterial),sparkMaterial);
+  emberCloud.name='ultimate-finisher-fire-embers';
+  emberCloud.frustumCulled=false;
+  emberCloud.renderOrder=16;
+  group.add(emberCloud);
+
+  return { group, uniforms };
 }
+
 
 function makeCrystalShards(root) {
   const count=40;
@@ -522,14 +662,14 @@ function makeFinisherImpact(root) {
 }
 
 export class UltimateEffect {
-  constructor(scene) {
+  constructor(scene, arenaRadius) {
     this.root = new THREE.Group();
     this.root.name = 'ultimate-silver-wakes';
     scene.add(this.root);
     this.slashes = SWORD_CUTS.map((cut,i) => makeBladeArc(this.root,cut,i));
     this.crest = makeFinisher(this.root);
     this.wakes = [0,1].map(index => makeFinisherWake(this.root,index));
-    this.groundLight = makeFinisherGroundLight(this.root);
+    this.groundFire = makeFinisherGroundFire(this.root,arenaRadius);
     this.shards = makeCrystalShards(this.root);
     this.impact = makeFinisherImpact(this.root);
     this.kicks = [];
@@ -575,14 +715,26 @@ export class UltimateEffect {
 
   updateFinisher(cast, frame, dt, intensity) {
     const { mesh, uniforms } = this.crest;
-    const age = frame-FINISHER.hit;
+    // Leaving hitstop can make pose interpolation briefly revisit the
+    // previous logic frame. The released projectile cannot step backward.
+    if (cast.wave) this.finisherFrame = Math.max(this.finisherFrame,frame);
+    const flightFrame = this.finisherFrame;
+    const age = flightFrame-FINISHER.hit;
     mesh.visible = !!cast.wave && age>=0 && age<=FINISHER.duration+10;
-    this.updateFinisherImpact(cast.wave,frame,intensity);
+    this.updateFinisherImpact(cast.wave,flightFrame,intensity);
     for (const wake of this.wakes) wake.mesh.visible = mesh.visible;
-    this.groundLight.mesh.visible = mesh.visible;
+    const fire = this.groundFire;
+    fire.group.visible = !!cast.wave && age>=0 && age<=FINISHER.duration+FINISHER.fireTail;
+    if (fire.group.visible) {
+      fire.group.position.copy(cast.wave.origin).setY(0);
+      fire.group.rotation.y = Math.atan2(cast.wave.direction.x,cast.wave.direction.z);
+      fire.uniforms.time.value = age/60;
+      fire.uniforms.extent.value = finisherRun(flightFrame)/FINISHER.distance;
+      fire.uniforms.power.value = intensity*1.18;
+    }
     if (!mesh.visible) return;
     const { origin, direction } = cast.wave;
-    mesh.position.copy(origin).addScaledVector(direction,finisherRun(frame));
+    mesh.position.copy(origin).addScaledVector(direction,finisherRun(flightFrame));
     mesh.rotation.y = Math.atan2(direction.x,direction.z);
     uniforms.age.value = age/FINISHER.duration;
     const launch = 1-smoothstep(age,1,10);
@@ -592,13 +744,8 @@ export class UltimateEffect {
       wake.mesh.position.copy(mesh.position);
       wake.mesh.rotation.y = mesh.rotation.y;
       wake.uniforms.age.value = uniforms.age.value;
-      wake.uniforms.power.value = intensity*fade*(.68+.35*launch);
+      wake.uniforms.power.value = intensity*fade*(.40+.23*launch);
     }
-    const floor=this.groundLight;
-    floor.mesh.position.copy(mesh.position).addScaledVector(direction,-1.27);
-    floor.mesh.position.y=.044;
-    floor.mesh.rotation.y=mesh.rotation.y;
-    floor.uniforms.power.value=intensity*fade*(.37+.55*launch);
     const tick = Math.floor(age);
     if (dt<=0 || tick===this.lastSparkFrame || age>=FINISHER.duration-7) return;
     this.lastSparkFrame = tick;
@@ -679,9 +826,10 @@ export class UltimateEffect {
     this.cast = null;
     this.contactShown = false;
     this.lastSparkFrame = -1;
+    this.finisherFrame = 0;
     this.flakes.clear();
     this.shards.clear();
-    this.groundLight.mesh.visible = false;
+    this.groundFire.group.visible = false;
     for (const wake of this.wakes) wake.mesh.visible = false;
     for (const slash of this.slashes) slash.clear();
     for (const echoes of this.kicks) for (const echo of echoes) {

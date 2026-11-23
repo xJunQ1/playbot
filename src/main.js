@@ -366,7 +366,7 @@ composer.addPass(sharpen);
 // The heat ripple warps the finished frame, including the swords and sparks.
 const impactCamera = new ImpactCamera();
 const dodgeEffect = new PerfectDodgeEffect(scene);
-const ultimateEffect = new UltimateEffect(scene);
+const ultimateEffect = new UltimateEffect(scene,ARENA_R);
 const bossSmashEffect = new BossSmashEffect(scene, STAGE.impactSurface);
 composer.addPass(bossSmashEffect.pass);
 composer.addPass(dodgeEffect.pass);
@@ -1257,10 +1257,11 @@ function resolveUltimateWave() {
   if (!cast) return;
   const wave = cast.wave;
   const age = logicFrame - wave.firedAt;
-  if (age > FINISHER.duration + 10) {
-    if (cast.hits === 0 && player.state !== 'dead' && (!ultimateCast || ultimateCast === cast)) {
-      banner('大招落空', 600, 'ultimate');
-    }
+  if (age === FINISHER.duration + 11 && cast.hits === 0 &&
+      player.state !== 'dead' && (!ultimateCast || ultimateCast === cast)) {
+    banner('大招落空', 600, 'ultimate');
+  }
+  if (age > FINISHER.duration + FINISHER.fireTail) {
     releasedUltimate = null;
     if (!ultimateCast) ultimateEffect.clear();
     return;

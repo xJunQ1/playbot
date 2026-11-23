@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { buildBasinGeometry, rimScale } from '../arena/impact-surface.js';
 import { fracturedRock } from '../arena/weathered.js';
 import { guardFromAO } from './ao-guard.js';
+import { createDescentLightning, createIntroAftershock } from './intro-impacts.js';
 
 const { smoothstep, lerp } = THREE.MathUtils;
 const uvVertex = `
@@ -31,27 +32,8 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
   root.position.copy(position);
   scene.add(root);
 
-  // A camera-facing plume with a white-hot core and thinner, curling red filaments.
-  const plume = sheet(6.1, 8.8, `
-    varying vec2 vUv;
-    uniform float time, strength;
-    void main() {
-      float y = vUv.y, x = vUv.x * 2.0 - 1.0;
-      float h = max(0.0, y - 0.12);
-      float head = length(vec2(x * 1.45, (y - 0.12) * 5.7));
-      x += (sin(15.0*y - 9.0*time) + 0.5*sin(27.0*y + 12.0*time)) * h * 0.13;
-      float line = exp(-abs(x) / (0.032 + 0.110 * (1.0-y))) * smoothstep(0.06, 0.14, y);
-      float ember = exp(-abs(abs(x) - (0.13 + h*0.30 + 0.045*sin(26.0*y - 13.0*time))) * 47.0);
-      float fade = 1.0 - smoothstep(0.46, 0.99, y);
-      float flame = (line + 0.38 * ember * smoothstep(0.09, 0.24, y)) * fade;
-      float glow = exp(-3.6*head) + exp(-abs(x)*5.0) * fade * smoothstep(0.06,0.14,y);
-      float core = exp(-head*8.0) + line*line*fade;
-      vec3 light = vec3(1.0,0.009,0.026)*(glow*0.70 + flame) + vec3(1.0,0.83,0.76)*core*1.45;
-      float feather = smoothstep(0.0,0.10,y) * (1.0-smoothstep(0.78,1.0,abs(vUv.x*2.0-1.0)));
-      gl_FragColor = vec4(light, strength*feather);
-    }`, true);
-  plume.name = 'boss-meteor-tail';
-  root.add(plume);
+  const lightning = lava ? null : createDescentLightning(root);
+  const aftershock = lava ? null : createIntroAftershock(root);
 
   const flare = sheet(6.5, 2.8, `
     varying vec2 vUv;
@@ -71,7 +53,7 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
   crater.receiveShadow = true;
   root.add(crater);
 
-  const shock = sheet(2, 2, `
+  const shock = lava ? sheet(2, 2, `
     varying vec2 vUv;
     uniform float strength, time;
     void main() {
@@ -81,10 +63,12 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
       float rim = exp(-abs(r-0.85)*39.0);
       float dust = exp(-abs(r-0.72)*10.0)*(0.60+0.27*sin(a*11.0));
       gl_FragColor = vec4(vec3(1.0,0.10,0.055)*rim + vec3(0.62,0.19,0.14)*dust, strength);
-    }`, true);
-  shock.rotation.x = -Math.PI/2;
-  shock.position.y = 0.086;
-  root.add(shock);
+    }`, true) : null;
+  if (shock) {
+    shock.rotation.x = -Math.PI/2;
+    shock.position.y = 0.086;
+    root.add(shock);
+  }
 
   const rockGeometry = fracturedRock();
   const normals = rockGeometry.attributes.normal, positions = rockGeometry.attributes.position;
@@ -114,21 +98,15 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
   return {
     update(age, sinceImpact, altitude, camera, opacity) {
       const airborne = sinceImpact < 0;
-      plume.visible = !lava && sinceImpact < 0.20;
-      if (plume.visible) {
-        plume.quaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP,
-          Math.atan2(camera.position.x-position.x, camera.position.z-position.z));
-        plume.position.y = altitude + 4.24;
-        plume.material.uniforms.time.value = age;
-        plume.material.uniforms.strength.value = 1.30*(1-smoothstep(sinceImpact,0,0.20));
-      }
+      lightning?.update(age,sinceImpact,altitude);
+      aftershock?.update(sinceImpact,opacity);
       crater.visible = rocks.visible = !airborne;
       flare.visible = !airborne && sinceImpact < 0.30;
       if (flare.visible) {
         flare.quaternion.copy(camera.quaternion);
-        flare.material.uniforms.strength.value = 2.4*(1-smoothstep(sinceImpact,0,0.30));
+        flare.material.uniforms.strength.value = (lava ? 2.4 : 1.12)*(1-smoothstep(sinceImpact,0,0.30));
       }
-      shock.visible = !airborne && sinceImpact < 0.68;
+      if (shock) shock.visible = !airborne && sinceImpact < 0.68;
       if (airborne) return;
       const footprint = opacity > 0 ? lerp(.72, radius, smoothstep(sinceImpact, 0, .19)) * Math.sqrt(opacity) : 0;
       surface.set(position, footprint);
@@ -136,7 +114,7 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
       crater.scale.set(footprint, Math.min(1, footprint), footprint);
       surface.heat.value = Math.exp(-(lava ? .42 : 1.8) * sinceImpact) * opacity;
       if (lava) surface.flow.value = sinceImpact;
-      if (shock.visible) {
+      if (shock?.visible) {
         shock.scale.setScalar(0.45 + 4.2*(1-(1-sinceImpact/0.68)**2));
         shock.material.uniforms.time.value = sinceImpact;
         shock.material.uniforms.strength.value = 1.7*(1-smoothstep(sinceImpact,0,0.68));
@@ -157,6 +135,7 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
     },
     dispose() {
       surface.set(position, 0);
+      lightning?.dispose();
       root.removeFromParent();
       rocks.dispose();
       for (const mesh of root.children) {
