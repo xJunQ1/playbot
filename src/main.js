@@ -1608,7 +1608,8 @@ const initialBossAI = () => ({
   lastMoveFrame: 0,
   gapFrames: 90,
   punishUntil: 0,
-  cataclysmAt: Infinity,
+  cataclysmQueue: [],
+  cataclysmReadyAt: 0,
   closeSince: null,
   comboRangeSince: null,
   playerAttack: null,
@@ -2078,7 +2079,8 @@ function startBossCataclysm() {
   boss.setState('attack', 'b_cataclysm');
   boss.speed = 0;
   boss.moving = false;
-  AI.cataclysmAt = Infinity;
+  AI.cataclysmQueue.shift();
+  AI.cataclysmReadyAt = logicFrame + totalFrames(CATACLYSM_MOVE) + CATACLYSM.phaseDelay;
   cataclysm = { ownerAction: boss.actionSequence, origin: boss.pos.clone(), impacted: false };
   bossSmashEffect.clear();
   cataclysmEffect.clear();
@@ -2233,7 +2235,7 @@ function bossTick() {
       // ── 阶段转换：血量跌破阈值时强制打断当前行为，吼一声进入下一阶段 ──
       if (!AI.phase2 && boss.hp < boss.maxHp * 0.55) {
         AI.phase2 = true;
-        AI.cataclysmAt = logicFrame + CATACLYSM.phaseDelay;
+        AI.cataclysmQueue.push(logicFrame + CATACLYSM.phaseDelay);
         AI.intentUntil = 0;
         AI.feintChecked = false;
         // 「怒吼」动作已取消：阶段转换只做横幅 / 场景变化，不再播那段站着扭头的动作
@@ -2247,13 +2249,15 @@ function bossTick() {
       }
       if (!AI.phase3 && boss.hp < boss.maxHp * 0.25) {
         AI.phase3 = true;
+        AI.cataclysmQueue.push(logicFrame + CATACLYSM.phaseDelay);
         AI.intentUntil = 0;
         // 「怒吼」动作已取消：阶段转换只做横幅 / 场景变化，不再播那段站着扭头的动作
         boss.moving = false;
         return;
       }
 
-      if (logicFrame >= AI.cataclysmAt && logicFrame - AI.lastMoveFrame >= Math.min(24, AI.gapFrames)
+      const cataclysmDue = Math.max(AI.cataclysmQueue[0] ?? Infinity, AI.cataclysmReadyAt);
+      if (logicFrame >= cataclysmDue && logicFrame - AI.lastMoveFrame >= Math.min(24, AI.gapFrames)
         && player.state !== 'ultimate' && !player.reactingToHit) {
         startBossCataclysm();
         return;
