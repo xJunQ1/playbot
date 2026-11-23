@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GRAB_TIMING, grabContactFrame } from './frame-data.js';
+import { GRAB_TIMING, grabContactFrame, grabLastContactFrame } from './frame-data.js';
 
 const TOSS_REACTION_FRAME = 27; // 受击底层动画接上抛空时的采样点。
 const KICK_BLEND = 7;
@@ -9,9 +9,11 @@ const GET_UP_GROUNDED = GET_UP.start + GET_UP.blend;
 const GET_UP_PLAY = GET_UP_GROUNDED + GET_UP.struggle;
 const GET_UP_IDLE = GET_UP_PLAY + GET_UP.play;
 const smooth = THREE.MathUtils.smoothstep;
-export const GRAB_REACH = { standOff: .60, near: .32, far: .73, side: .33 };
+export const GRAB_REACH = { standOff: .60, near: .32, side: .33 };
+export const GRAB_HAND_RADIUS = .10;
+const GRAB_TORSO_RADIUS = .16;
 
-export function grabSideTolerance(boss) {
+function grabSideTolerance(boss) {
   return Math.min(GRAB_REACH.side, boss.move.hitbox.radius * boss.scale);
 }
 
@@ -31,10 +33,52 @@ export function inGrabReach(boss, target) {
   return !!reach && reach.gap >= GRAB_REACH.near && reach.gap <= reach.far;
 }
 
+function grabTorso(player, position, yaw = player.yaw) {
+  const x = Math.sin(yaw), z = Math.cos(yaw);
+  const side = .025 * player.scale, front = .10 * player.scale;
+  return new THREE.Vector3(
+    position.x + z * side + x * front,
+    position.y + player.hurt.height * player.scale * .735,
+    position.z - x * side + z * front,
+  );
+}
+
+// The hand uses the same curve for the pose and the combat contact test.
+export function grabHandPosition(boss, player, position = player.pos, yaw = player.yaw, frame = boss.frame) {
+  const { move } = boss;
+  const forward = boss.forward;
+  const dashEnd = move.startup + move.active;
+  const hand = grabPoint(boss, forward, .36, .29, 1.29);
+  const target = inGrabReach(boss, position)
+    ? grabTorso(player, position, yaw).addScaledVector(forward, -.10)
+    : grabPoint(boss, forward, .19, .43, 1.38);
+  const extension = smooth(frame, dashEnd, grabContactFrame(move));
+  const lastContact = grabLastContactFrame(move);
+  const retract = 1 - smooth(frame, lastContact, lastContact + 6);
+  return hand.lerp(target, extension * retract);
+}
+
+export function grabTouchesTorso(boss, hand, player, position, yaw = player.yaw) {
+  const forward = boss.forward;
+  const torso = grabTorso(player, position, yaw);
+  const facing = (torso.x - boss.pos.x) * forward.x + (torso.z - boss.pos.z) * forward.z;
+  if (facing <= .18) return false;
+  const dy = Math.max(0, Math.abs(hand.y - torso.y) - .14 * player.scale);
+  return (hand.x - torso.x) ** 2 + (hand.z - torso.z) ** 2 + dy ** 2
+    <= (GRAB_HAND_RADIUS + GRAB_TORSO_RADIUS * player.scale) ** 2;
+}
+
+export function grabSweepsTorso(boss, hand, player, sweep, probe) {
+  if (sweep.distanceSq() <= 1e-8) return grabTouchesTorso(boss, hand, player, sweep.end);
+  const torsoOffset = grabTorso(player, sweep.start).sub(sweep.start);
+  sweep.closestPointToPoint(probe.copy(hand).sub(torsoOffset), true, probe);
+  return grabTouchesTorso(boss, hand, player, probe);
+}
+
 export function grabBossAnimation(boss) {
   if (!boss.grabConnected || !boss.binder?.clipMap.grabKick) return;
   const { kickStart, kick, followThrough } = GRAB_TIMING;
-  const elapsed = boss.frame - grabContactFrame(boss.move);
+  const elapsed = boss.frame - boss.grabHitFrame;
   if (elapsed < kickStart) return;
   if (elapsed > followThrough) return { key: 'idle', fade: KICK_BLEND / 60 };
   const duration = boss.binder.clips.get(boss.binder.clipMap.grabKick).duration;
@@ -267,12 +311,12 @@ export function poseBossGrab(boss, player, sequence) {
   const side = new THREE.Vector3(forward.z, 0, -forward.x);
   const dashEnd = move.startup + move.active;
   const contactFrame = grabContactFrame(move);
-  const elapsed = frame - contactFrame;
+  const elapsed = frame - (boss.grabHitFrame ?? contactFrame);
   const smooth = THREE.MathUtils.smoothstep;
   const visualScale = boss.binder ? 1 : boss.scale;
   const world = (x, z, y) => grabPoint(boss, forward, x * visualScale, z * visualScale, y * visualScale);
   const ready = smooth(frame, 0, move.startup * 0.78);
-  const missed = boss.grabConnected ? 0 : smooth(elapsed, 0, GRAB_TIMING.missRecovery);
+  const missed = boss.grabConnected ? 0 : smooth(frame - grabLastContactFrame(move), 0, GRAB_TIMING.missRecovery);
   const settle = smooth(elapsed, GRAB_TIMING.followThrough, GRAB_TIMING.recover);
   const upperWeight = ready * (1 - missed) * (1 - settle);
   centerPelvis(boss, rig.pelvis, upperWeight);
@@ -288,8 +332,11 @@ export function poseBossGrab(boss, player, sequence) {
     worldRotate(rig.spine, delta.setFromAxisAngle(side, lean), 1);
   }
 
-  if (!boss.grabConnected && frame >= move.startup - 5) {
-    const stride = Math.sin(smooth(frame, move.startup - 5, dashEnd + 1) * Math.PI);
+  const followStep = Math.sin(smooth(frame, dashEnd, contactFrame) * Math.PI)
+    * smooth(boss.grabStep?.travelled ?? 0, .012, .28);
+  if ((!boss.grabConnected && frame >= move.startup - 5) || followStep > 1e-4) {
+    const rushStride = Math.sin(smooth(frame, move.startup - 5, dashEnd + 1) * Math.PI);
+    const stride = Math.max(rushStride, followStep);
     poseLimb(rig.rightLeg, world(-0.16, 0.50 * stride, 0.10 + 0.17 * stride),
       forward.clone(), upperWeight * stride);
     poseLimb(rig.leftLeg, world(0.16, -0.27 * stride, 0.10), forward.clone(), upperWeight * stride);
@@ -300,12 +347,9 @@ export function poseBossGrab(boss, player, sequence) {
   boss.binder?.groundPose(boss, 0);
 
   const windup = smooth(frame, move.startup - 8, dashEnd);
-  const hand = world(0.36, 0.12 + 0.17 * windup, 0.92 + 0.37 * windup);
-  if (!boss.grabConnected && frame >= dashEnd && move.active > 0) {
-    const close = frame <= contactFrame && inGrabReach(boss, player.pos);
-    const extension = close ? playerGripTarget(player, forward) : world(.20, GRAB_REACH.far, 1.34);
-    hand.lerp(extension, smooth(frame, dashEnd, contactFrame));
-  }
+  const hand = !boss.grabConnected && frame >= dashEnd && move.active > 0
+    ? grabHandPosition(boss, player)
+    : world(0.36, 0.12 + 0.17 * windup, 0.92 + 0.37 * windup);
   if (boss.grabConnected && rig.chest) {
     const lift = smooth(elapsed, GRAB_TIMING.pull, GRAB_TIMING.lift);
     const grip = rig.chest.getWorldPosition(new THREE.Vector3())

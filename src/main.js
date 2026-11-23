@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import GUI from 'lil-gui';
-import { CFG, MOVES, LIMITS, GRAB_TIMING, grabContactFrame, totalFrames, motionAt, dumpJSON, moveIssues, validateAll } from './frame-data.js';
+import { CFG, MOVES, LIMITS, GRAB_TIMING, grabContactFrame, grabLastContactFrame, totalFrames, motionAt, dumpJSON, moveIssues, validateAll } from './frame-data.js';
 import { makeFighter, createViz, placeViz, applyPose } from './graybox.js';
 import { buildStage, updateStage, ARENA_R } from './arena/stage.js';
 import { createSettings } from './settings.js';
@@ -27,7 +27,9 @@ import { ULTIMATE_END, ULTIMATE_CANCEL_FROM, ULTIMATE_CAMERA_RETURN, ULTIMATE_CU
 import { METEOR, meteorFrame, newMeteorSmash, updateMeteorSmash } from './meteor-smash.js';
 import { BossSmashEffect } from './vfx/boss-smash.js';
 import { BossGrabBlink } from './vfx/grab-blink.js';
-import { GRAB_REACH, grabReachBounds, grabSideTolerance, inGrabReach, clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
+import { GRAB_REACH, GRAB_HAND_RADIUS, grabReachBounds, inGrabReach, grabHandPosition, grabTouchesTorso, grabSweepsTorso,
+  clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus,
+  grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
 
 // ═══════════════════════════════════════════════════════════════
 //  0.0 调参持久化（帧数据 / 全局 CFG / 特效）
@@ -63,6 +65,8 @@ const PRE_METEOR_MOVES_REV = moveRevision(Object.fromEntries(preMeteorMoves));
 const priorMoves = Object.fromEntries(preMeteorMoves.filter(([id]) => id !== 'b_grab'));
 const PRIOR_MOVES_REV = moveRevision(priorMoves);
 const GRAB_TEST_MOVES_REV = '5ca4ea42'; // Finalized grab recovery is longer than this save format's default.
+const PRE_GRAB_FLASH_METEOR_REV = '3bde5fe0';
+const PRE_GRAB_FLASH_REVISIONS = ['3a872754', PRE_GRAB_FLASH_METEOR_REV, 'c5993202', '3422a0cb'];
 const PRE_POISE_REVISIONS = ['1f85fb6a', 'c596bfa4', 'bcbe563f'];
 const BOSS_POISE_UPDATED = new Set(['b_sweep', 'b_slam', 'b_heavy_combo']);
 const ORIGINAL_GRAB_MOVES_REV = 'ac84b67d'; // 旧擒拿配置的命中范围不在存档字段内。
@@ -122,7 +126,9 @@ async function tuningLoad() {
     try { data = JSON.parse(localStorage.getItem(TUNING_KEY) || 'null'); } catch { data = null; }
   }
   // 没有 rev 字段的老存档（或 rev 对不上）= 招式数值不可信，整块丢弃
-  const revOk = !data || !data.moves || [MOVES_REV, PRE_METEOR_DESCENT_REV, PRE_METEOR_MOVES_REV, GRAB_TEST_MOVES_REV, ORIGINAL_GRAB_MOVES_REV, PRIOR_MOVES_REV, LEGACY_MOVES_REV, ...PRE_POISE_REVISIONS].includes(data.rev);
+  const revOk = !data || !data.moves || [MOVES_REV, PRE_METEOR_DESCENT_REV, PRE_METEOR_MOVES_REV,
+    GRAB_TEST_MOVES_REV, ORIGINAL_GRAB_MOVES_REV, PRIOR_MOVES_REV, LEGACY_MOVES_REV,
+    ...PRE_GRAB_FLASH_REVISIONS, ...PRE_POISE_REVISIONS].includes(data.rev);
   if (!revOk) {
     console.warn(`[tuning] 招式表代码已更新（rev ${data.rev} → ${MOVES_REV}），旧存档的招式数值作废，改用代码里的数字`);
   }
@@ -131,10 +137,15 @@ async function tuningLoad() {
       if (data.moves[id]?.poise === 0) delete data.moves[id].poise;
     }
   }
-  if (data?.rev === PRE_METEOR_DESCENT_REV && data.moves?.b_meteor?.startup === METEOR.impact) {
+  if ((data?.rev === PRE_METEOR_DESCENT_REV || data?.rev === PRE_GRAB_FLASH_METEOR_REV) &&
+      data.moves?.b_meteor?.startup === METEOR.impact) {
     delete data.moves.b_meteor.startup;
   }
   const savedGrab = revOk ? data?.moves?.b_grab : null;
+  if (savedGrab && data.rev !== MOVES_REV && (savedGrab.startup ?? 32) === 32 && (savedGrab.active ?? 12) === 12) {
+    delete savedGrab.startup;
+    delete savedGrab.active;
+  }
   if (typeof savedGrab?.recovery === 'number' && savedGrab.recovery < GRAB_TIMING.recover) {
     savedGrab.recovery = GRAB_TIMING.recover;
   }
@@ -620,6 +631,11 @@ class Actor {
     this.state = name;
     this.actionSequence++;
     this.grabConnected = false;
+    this.grabHitFrame = null;
+    this.grabDashDistance = null;
+    this.grabAimYaw = null;
+    this.grabStandOff = GRAB_REACH.standOff;
+    this.grabStep = null;
     if (name !== 'backstep') this.backstep = null;
     if (name !== 'recover') this.recoveryFrames = 0;
     this.frame = 0;
@@ -825,8 +841,9 @@ function cylinderHit(aPos, aR, aY0, aY1, bPos, bR, bY0, bY1) {
 function activeStrike(move, frame) {
   if (!move || move.active <= 0) return null;
   if (move.grab) {
-    const startup = grabContactFrame(move);
-    return frame >= startup && frame < startup + 1 ? { index: 0, startup, active: 1, swing: move.swing } : null;
+    const startup = grabContactFrame(move) - GRAB_TIMING.contactLead;
+    const active = GRAB_TIMING.contactFrames;
+    return frame >= startup && frame < startup + active ? { index: 0, startup, active, swing: move.swing } : null;
   }
   const followUps = move.followUps;
   if (followUps) {
@@ -853,13 +870,15 @@ function activeHitbox(actor) {
       yMin: 0, yMax: m.hitbox.yMax,
     };
   }
-  const f = actor.forward;
   if (m.grab) {
+    if (actor.grabConnected) return null;
+    const center = grabHandPosition(actor, player);
     return {
-      strike, center: grabPoint(actor, f, 0, GRAB_REACH.standOff, 0),
-      radius: grabSideTolerance(actor), yMin: 1.10, yMax: 1.65,
+      strike, center, radius: GRAB_HAND_RADIUS,
+      yMin: center.y - GRAB_HAND_RADIUS, yMax: center.y + GRAB_HAND_RADIUS,
     };
   }
+  const f = actor.forward;
   const center = actor.pos.clone().addScaledVector(f, m.hitbox.offset * actor.scale);
   return {
     strike,
@@ -894,6 +913,8 @@ const ultimateDelta = new THREE.Vector3();
 const ultimateTarget = new THREE.Vector3();
 const POISE_BREAK_FRAMES = { player: 44, boss: 96 };
 const rollSweep = new THREE.Line3();
+const playerWalkStep = new THREE.Vector3();
+const rollEntry = { position: new THREE.Vector3(), walkStep: new THREE.Vector3(), yaw: 0 };
 const dodgeProbe = new THREE.Vector3();
 let perfectDodgeFrame = null;
 let dodgeSlowTime = 0;
@@ -933,26 +954,57 @@ function confirmPerfectDodge() {
   banner('完美闪避', 690, 'dodge');
 }
 
+function inPerfectDodgeWindow() {
+  return player.state === 'roll' && player.iframe > 0 &&
+    perfectDodgeFrame === null && player.frame < PERFECT_DODGE_FRAMES;
+}
+
+function grabArrivalDodge() {
+  const move = boss.move;
+  if (!move?.grab || !inPerfectDodgeWindow()) return null;
+  const firstContact = grabContactFrame(move) - GRAB_TIMING.contactLead;
+  if (boss.frame < move.startup + move.active || boss.frame >= firstContact) return null;
+  const strike = activeStrike(move, firstContact);
+  if (!strike) return null;
+  // At the blink destination, test the imminent grab using the same hand pose as the first live frame.
+  const center = grabHandPosition(boss, player, player.pos, player.yaw, firstContact);
+  return { strike, center, dodgeSampleFrame: firstContact };
+}
+
+function dodgedGrabContact(hand, frame) {
+  if (grabSweepsTorso(boss, hand, player, rollSweep, dodgeProbe)) return true;
+  // The reach can finish several ticks after the roll has left the original target.
+  const { position, yaw } = rollEntry;
+  const committedHand = grabHandPosition(boss, player, position, yaw, frame);
+  if (grabTouchesTorso(boss, committedHand, player, position, yaw)) return true;
+  const continued = grabRollTarget(frame);
+  return continued !== position && grabTouchesTorso(boss,
+    grabHandPosition(boss, player, continued, yaw, frame), player, continued, yaw);
+}
+
 function resolveHit(attacker, defender, hb) {
   if (!hb || attacker.state === 'dead' || defender.state === 'dead') return;
   if (defender === player && grabSequence) return;
   const hitKey = hb.strike.index + ':' + defender.name;
   if (attacker.hitSet.has(hitKey)) return;
-  const perfectWindow = defender === player && player.state === 'roll' &&
-    player.iframe > 0 && perfectDodgeFrame === null && player.frame < PERFECT_DODGE_FRAMES;
-  if (defender.iframe > 0 && !perfectWindow) return;
+  const perfectWindow = defender === player && inPerfectDodgeWindow();
+  if (!perfectWindow && (defender.iframe > 0 || hb.dodgeSampleFrame !== undefined)) return;
 
-  const hurtY = defender.pos.y;
-  const hurtY1 = hurtY + defender.hurt.height * defender.scale;
-  const hurtR = defender.hurt.radius * defender.scale;
-  // The player may cross the rim of the attack volume in the same frame.
-  const target = perfectWindow && rollSweep.distanceSq() > 1e-8
-    ? rollSweep.closestPointToPoint(hb.center, true, dodgeProbe)
-    : defender.pos;
   const grab = attacker === boss && attacker.move.grab;
-  const connects = grab ? inGrabReach(boss, target)
-    : cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax, target, hurtR, hurtY, hurtY1);
-  if (!connects) return;
+  if (grab) {
+    const contact = perfectWindow ? dodgedGrabContact(hb.center, hb.dodgeSampleFrame)
+      : grabTouchesTorso(boss, hb.center, player, defender.pos);
+    if (!contact) return;
+  } else {
+    const hurtY = defender.pos.y;
+    const hurtY1 = hurtY + defender.hurt.height * defender.scale;
+    const hurtR = defender.hurt.radius * defender.scale;
+    // The player may cross the rim of the attack volume in the same frame.
+    const target = perfectWindow && rollSweep.distanceSq() > 1e-8
+      ? rollSweep.closestPointToPoint(hb.center, true, dodgeProbe)
+      : defender.pos;
+    if (!cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax, target, hurtR, hurtY, hurtY1)) return;
+  }
   if (perfectWindow) {
     attacker.hitSet.add(hitKey);
     confirmPerfectDodge();
@@ -1520,6 +1572,9 @@ function rollDist(frame) {
 }
 
 function startRoll() {
+  rollEntry.position.copy(player.pos);
+  rollEntry.walkStep.copy(playerWalkStep);
+  rollEntry.yaw = player.yaw;
   const fwdInput = (down('fwd') ? 1 : 0) - (down('back') ? 1 : 0);
   const strafeInput = (down('right') ? 1 : 0) - (down('left') ? 1 : 0);
   if (fwdInput || strafeInput) {
@@ -1593,6 +1648,7 @@ function lerpYaw(from, to, weight) {
 function capturePlayer() {
   const move = boss.move;
   boss.grabConnected = true;
+  boss.grabHitFrame = boss.frame;
   const direction = boss.forward;
   grabSequence = {
     phase: 'held', age: 0, direction, origin: player.pos.clone(), damage: move.damage,
@@ -1692,6 +1748,77 @@ function advanceGrab() {
   }
 }
 
+const GRAB_STEP = { range: 1.17, travel: .56, turn: THREE.MathUtils.degToRad(50) };
+const GRAB_LEAD = { frames: 18, extraDash: 2.25 };
+
+function grabRollTarget(frame = boss.frame) {
+  const { position, walkStep } = rollEntry;
+  if (boss.grabAimYaw === null || walkStep.lengthSq() <= 1e-6) return position;
+  // Keep the counterfactual target moving as it was immediately before the roll.
+  const elapsed = player.frame + 1 + Math.max(0, frame - boss.frame);
+  return clampToWall(position.clone().addScaledVector(walkStep, elapsed), playerWallRadius());
+}
+
+function stepGrabReach(move, dashEnd, previousFrame) {
+  const firstContact = grabContactFrame(move) - GRAB_TIMING.contactLead;
+  const rolling = player.state === 'roll' && player.iframe > 0;
+  let target = rolling ? grabRollTarget() : player.pos;
+  if (boss.grabAimYaw !== null && boss.frame < firstContact) {
+    target = rolling ? grabRollTarget(firstContact)
+      : clampToWall(player.pos.clone().addScaledVector(playerWalkStep, firstContact - boss.frame), playerWallRadius());
+  }
+  if (boss.frame === dashEnd) {
+    // Lock the direction of the follow-through step at the blink destination.
+    const dx = target.x - boss.pos.x, dz = target.z - boss.pos.z;
+    const distance = Math.hypot(dx, dz);
+    const yaw = lerpYaw(boss.yaw, Math.atan2(dx, dz), 1);
+    if (distance >= GRAB_REACH.near && distance <= GRAB_STEP.range &&
+        Math.abs(yaw - boss.yaw) <= GRAB_STEP.turn && Math.abs(target.y - boss.pos.y) <= .25) {
+      boss.grabStep = { fromYaw: boss.yaw, yaw, x: dx / distance, z: dz / distance, travelled: 0 };
+    }
+  }
+  const step = boss.grabStep;
+  const contact = grabContactFrame(move);
+  if (!step || boss.frame > contact) return;
+  const progress = THREE.MathUtils.smoothstep(boss.frame, dashEnd, contact);
+  const previous = THREE.MathUtils.smoothstep(previousFrame, dashEnd, contact);
+  boss.yaw = lerpYaw(step.fromYaw, step.yaw, progress);
+  const ahead = (target.x - boss.pos.x) * step.x + (target.z - boss.pos.z) * step.z;
+  const stride = Math.max(0, Math.min(ahead - boss.grabStandOff, GRAB_STEP.travel * (progress - previous)));
+  if (stride > 0) {
+    boss.pos.x += step.x * stride;
+    boss.pos.z += step.z * stride;
+    step.travelled += stride;
+    boss.clampToArena();
+  }
+}
+
+function lockGrabDash(move) {
+  const base = move.dashDistance;
+  const limit = base + (move.dashExtension ?? 0);
+  if (playerWalkStep.lengthSq() > 1e-6) {
+    // Aim where sustained ground movement will take the player by the first live grab frame.
+    const contact = grabContactFrame(move) - GRAB_TIMING.contactLead;
+    const lead = THREE.MathUtils.clamp(contact - boss.frame, 0, GRAB_LEAD.frames);
+    const target = clampToWall(player.pos.clone().addScaledVector(playerWalkStep, lead), playerWallRadius());
+    const dx = target.x - boss.pos.x, dz = target.z - boss.pos.z;
+    const distance = Math.hypot(dx, dz);
+    const extra = Math.min(GRAB_LEAD.extraDash, playerWalkStep.length() * (move.startup + move.active));
+    boss.grabAimYaw = Math.atan2(dx, dz);
+    // Close in further when the player's torso turns sideways or away from the approaching hand.
+    const forward = player.forward;
+    const away = (forward.x * dx + forward.z * dz) / Math.max(distance, .001);
+    const turnAway = THREE.MathUtils.clamp(.40 + .65 * away, 0, 1);
+    boss.grabStandOff = GRAB_REACH.standOff - .20 * turnAway;
+    boss.grabDashDistance = THREE.MathUtils.clamp(distance - boss.grabStandOff, 0, limit + extra);
+    return;
+  }
+  const bounds = grabReachBounds(boss, player.pos);
+  const needed = bounds && bounds.gap >= GRAB_REACH.near && bounds.far >= GRAB_REACH.standOff
+    ? bounds.gap - GRAB_REACH.standOff : base;
+  boss.grabDashDistance = THREE.MathUtils.clamp(needed, 0, limit);
+}
+
 function tickBossGrab(move) {
   const previousFrame = boss.frame++;
   const trackingFrames = move.aimLockFrames === undefined
@@ -1700,23 +1827,33 @@ function tickBossGrab(move) {
     const d = player.pos.clone().sub(boss.pos);
     boss.turnToward(Math.atan2(d.x, d.z), CFG.bossTurnFrames);
   }
+  if (boss.grabDashDistance === null && boss.frame >= Math.min(trackingFrames, move.startup)) {
+    lockGrabDash(move);
+  }
+  if (boss.grabAimYaw !== null && boss.frame <= move.startup) {
+    if (boss.frame === move.startup) boss.yaw = boss.grabAimYaw;
+    else boss.turnToward(boss.grabAimYaw, CFG.bossTurnFrames);
+  }
   const dashEnd = move.startup + move.active;
   if (move.active > 0 && boss.frame >= move.startup && boss.frame < dashEnd) {
     if (boss.frame === move.startup && VFX_CFG.enabled && VFX_CFG.intensity > 0) {
       bossGrabBlink.begin(boss.pos, boss.yaw, logicFrame - 1);
     }
     const advance = frame => THREE.MathUtils.smoothstep(frame, move.startup - 1, dashEnd - 1);
-    const stride = (advance(boss.frame) - advance(previousFrame)) * move.dashDistance;
+    const stride = (advance(boss.frame) - advance(previousFrame)) * boss.grabDashDistance;
     const bounds = player.iframe <= 0 ? grabReachBounds(boss, player.pos) : null;
-    const stopInReach = bounds && bounds.gap >= GRAB_REACH.near && bounds.far >= GRAB_REACH.standOff;
-    const distance = stopInReach ? Math.min(stride, Math.max(0, bounds.gap - GRAB_REACH.standOff)) : stride;
+    const stopInReach = bounds && bounds.gap >= GRAB_REACH.near && bounds.far >= boss.grabStandOff;
+    const distance = stopInReach ? Math.min(stride, Math.max(0, bounds.gap - boss.grabStandOff)) : stride;
     if (distance > 0) {
       boss.translate(distance);
       bossGrabBlink.trace(boss.pos, logicFrame);
     }
-    if (distance < stride && inGrabReach(boss, player.pos)) boss.frame = dashEnd;
+    if (boss.grabDashDistance === 0 || (distance < stride && inGrabReach(boss, player.pos))) boss.frame = dashEnd;
   }
-  const contactFrame = grabContactFrame(move);
+  if (!boss.grabConnected && move.active > 0 && boss.frame >= dashEnd) {
+    stepGrabReach(move, dashEnd, previousFrame);
+  }
+  const contactFrame = boss.grabHitFrame ?? grabLastContactFrame(move);
   const recovery = boss.grabConnected ? Math.max(move.recovery, GRAB_TIMING.recover) : GRAB_TIMING.missRecovery;
   if (boss.frame >= contactFrame + recovery) finishBossAttack(BOSS_ATTACK_RULES.b_grab.punishFrames);
 }
@@ -2259,6 +2396,10 @@ function tick() {
   const previousPlayerFrame = player.frame;
   const previousBossFrame = boss.frame;
   playerTick();
+  playerWalkStep.set(0, 0, 0);
+  if (player.moving && (player.state === 'move' || player.state === 'block')) {
+    playerWalkStep.subVectors(player.pos, player.previousPosition).setY(0);
+  }
   bossTick();
   player.stepHitSlide();
   boss.stepHitSlide();
@@ -2268,7 +2409,7 @@ function tick() {
   if (player.state === 'ultimate' && ultimateCast) resolveUltimateCuts(ultimateCast);
   resolveUltimateWave();
   resolveHit(player, boss, activeHitbox(player));
-  const bossHit = activeHitbox(boss);
+  const bossHit = activeHitbox(boss) ?? grabArrivalDodge();
   if (bossHit && boss.move.meteor) {
     cameraImpact(contactDirection(boss,player,bossHit.center),IMPACT.meteor.shake,.90);
     bossSmashEffect.impact(bossHit.center, VFX_CFG.enabled ? VFX_CFG.intensity : 0);
@@ -2295,7 +2436,7 @@ function tick() {
   const bossDashingToGrab = boss.move?.grab && boss.frame >= boss.move.startup
     && boss.frame < boss.move.startup + boss.move.active;
   const bossApproachingGrab = boss.move?.grab && boss.move.active > 0 && boss.frame >= boss.move.startup
-    && boss.frame <= grabContactFrame(boss.move);
+    && boss.frame <= grabLastContactFrame(boss.move);
   if (bossApproachingGrab) grabSpacing = true;
   if (bossGrabBlink.dashing && (!bossDashingToGrab || player.state === 'dead')) {
     bossGrabBlink.finish(boss.pos, logicFrame);
@@ -2901,8 +3042,9 @@ function render(dtReal, dodgeScale) {
     pv ? pv.yMin : 0, pv ? pv.yMax : 1, showHitbox && !!pv);
 
   const bv = activeHitbox(boss);
-  placeViz(boss.hitViz, boss.pos, boss.yaw,
-    boss.move?.grab ? GRAB_REACH.standOff : boss.move ? boss.move.hitbox.offset * boss.scale : 0,
+  const grabHitbox = boss.move?.grab && bv;
+  placeViz(boss.hitViz, grabHitbox ? bv.center : boss.pos, boss.yaw,
+    grabHitbox || !boss.move ? 0 : boss.move.hitbox.offset * boss.scale,
     bv ? bv.radius : 0,
     bv ? bv.yMin : 0, bv ? bv.yMax : 1, showHitbox && !!bv);
 
@@ -3373,7 +3515,7 @@ function updateGrabTestStatus() {
   else if (!move?.grab) grabTest.status = '待命 · G 出招';
   else if (boss.frame < move.startup) grabTest.status = '红光预警';
   else if (boss.frame < move.startup + move.active) grabTest.status = '闪现接近';
-  else if (boss.frame < grabContactFrame(move)) grabTest.status = '现身伸手';
+  else if (boss.frame <= grabLastContactFrame(move)) grabTest.status = '现身伸手';
   else grabTest.status = boss.grabConnected ? '命中收招' : '抓空收招';
 }
 
@@ -3389,7 +3531,7 @@ if (grabTestMode) {
   const params = gui.addFolder('擒拿参数 · 下次出招生效').open();
   params.add(grabTest, 'startup', 8, 120, 1).name('红光预警 (帧)');
   params.add(grabTest, 'active', 3, 40, 1).name('闪现位移 (帧)');
-  params.add(grabTest, 'dashDistance', 1, 9, 0.05).name('闪现距离 (m)');
+  params.add(grabTest, 'dashDistance', 1, 9, 0.05).name('基础闪现距离 (m)');
   params.add(grabTest, 'hitRadius', 0.12, GRAB_REACH.side, 0.01).name('横向抓取容差 (m)');
   params.add(grabTest, 'aimLockFrames', 0, 30, 1).name('提前锁方向 (帧)');
   params.add(grabTest, 'damage', 0, 600, 5).name('踢击伤害');
@@ -3450,6 +3592,7 @@ function resetFight() {
   impactCamera.clear();
   vfx.clear();
   dodgeEffect.clear();
+  playerWalkStep.set(0, 0, 0);
   perfectDodgeFrame = null;
   dodgeSlowTime = 0;
   dodgeVisualAlpha = 1;

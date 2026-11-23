@@ -46,6 +46,8 @@ const TOSS_START = LIFT_END + 90;
 
 export const GRAB_TIMING = {
   reach: 4,
+  contactLead: 1,
+  contactFrames: 4,
   pull: 7,
   lift: LIFT_END,
   toss: TOSS_START,
@@ -178,9 +180,9 @@ export const MOVES = {
   },
   b_grab: {
     label: '破防擒拿', swing: 'none', grab: true,
-    startup: 32, active: 12, recovery: GRAB_TIMING.recover, cancelFrom: 0,
+    startup: 37, active: 7, recovery: GRAB_TIMING.recover, cancelFrom: 0,
     damage: 280, poise: 0, hitstun: 0, stamina: 0,
-    dashDistance: 5.25, aimLockFrames: 6,
+    dashDistance: 5.25, dashExtension: 1.10, aimLockFrames: 6,
     hitbox: { offset: 0.24, radius: 0.42, yMin: 0.10, yMax: 0.64 },
     minRange: 4.1, maxRange: 6.9, weight: 0.42, cooldown: 13,
   },
@@ -188,11 +190,16 @@ export const MOVES = {
 
 /** 派生：总帧数 */
 export function totalFrames(m) {
-  return (m.grab ? grabContactFrame(m) : m.startup + m.active) + m.recovery;
+  return (m.grab ? grabLastContactFrame(m) : m.startup + m.active) + m.recovery;
 }
 
 export function grabContactFrame(move) {
   return move.startup + move.active + (move.active > 0 ? GRAB_TIMING.reach : 0);
+}
+
+export function grabLastContactFrame(move) {
+  const extra = move.active > 0 ? GRAB_TIMING.contactFrames - GRAB_TIMING.contactLead - 1 : 0;
+  return grabContactFrame(move) + extra;
 }
 
 // ─────────────────────────────────────────────────────────────
