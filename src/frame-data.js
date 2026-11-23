@@ -45,6 +45,7 @@ const LIFT_END = 43;
 const TOSS_START = LIFT_END + 90;
 
 export const GRAB_TIMING = {
+  reach: 4,
   pull: 7,
   lift: LIFT_END,
   toss: TOSS_START,
@@ -187,7 +188,11 @@ export const MOVES = {
 
 /** 派生：总帧数 */
 export function totalFrames(m) {
-  return m.startup + m.active + m.recovery;
+  return (m.grab ? grabContactFrame(m) : m.startup + m.active) + m.recovery;
+}
+
+export function grabContactFrame(move) {
+  return move.startup + move.active + (move.active > 0 ? GRAB_TIMING.reach : 0);
 }
 
 // ─────────────────────────────────────────────────────────────

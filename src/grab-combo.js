@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GRAB_TIMING } from './frame-data.js';
+import { GRAB_TIMING, grabContactFrame } from './frame-data.js';
 
 const TOSS_REACTION_FRAME = 27; // 受击底层动画接上抛空时的采样点。
 const KICK_BLEND = 7;
@@ -9,11 +9,32 @@ const GET_UP_GROUNDED = GET_UP.start + GET_UP.blend;
 const GET_UP_PLAY = GET_UP_GROUNDED + GET_UP.struggle;
 const GET_UP_IDLE = GET_UP_PLAY + GET_UP.play;
 const smooth = THREE.MathUtils.smoothstep;
+export const GRAB_REACH = { standOff: .60, near: .32, far: .73, side: .33 };
+
+export function grabSideTolerance(boss) {
+  return Math.min(GRAB_REACH.side, boss.move.hitbox.radius * boss.scale);
+}
+
+export function grabReachBounds(boss, target) {
+  const { x, z } = boss.forward;
+  const dx = target.x - boss.pos.x, dz = target.z - boss.pos.z;
+  const lateral = dx * z - dz * x;
+  if (Math.abs(lateral) > grabSideTolerance(boss) || Math.abs(target.y - boss.pos.y) > .25) return null;
+  // A cross-body reach loses forward extension as the target moves away from the left shoulder.
+  const fromShoulder = lateral - .16;
+  const far = .23 + Math.sqrt(Math.max(0, .50 ** 2 - fromShoulder ** 2));
+  return { gap: dx * x + dz * z, far };
+}
+
+export function inGrabReach(boss, target) {
+  const reach = grabReachBounds(boss, target);
+  return !!reach && reach.gap >= GRAB_REACH.near && reach.gap <= reach.far;
+}
 
 export function grabBossAnimation(boss) {
   if (!boss.grabConnected || !boss.binder?.clipMap.grabKick) return;
   const { kickStart, kick, followThrough } = GRAB_TIMING;
-  const elapsed = boss.frame - boss.move.startup - boss.move.active;
+  const elapsed = boss.frame - grabContactFrame(boss.move);
   if (elapsed < kickStart) return;
   if (elapsed > followThrough) return { key: 'idle', fade: KICK_BLEND / 60 };
   const duration = boss.binder.clips.get(boss.binder.clipMap.grabKick).duration;
@@ -230,13 +251,22 @@ export function poseLimb(limb, target, bend, weight) {
   aimAt(lower, tip, end, weight);
 }
 
-export function poseBossGrab(boss) {
+function playerGripTarget(player, forward) {
+  const chest = rigFor(player).chest;
+  const target = chest
+    ? chest.getWorldPosition(new THREE.Vector3())
+    : player.mesh.group.position.clone().addScaledVector(THREE.Object3D.DEFAULT_UP, 1.35);
+  return target.addScaledVector(forward, -.10);
+}
+
+export function poseBossGrab(boss, player, sequence) {
   if (!boss.move?.grab) return;
   const rig = rigFor(boss);
   const { frame, move } = boss;
   const forward = boss.forward;
   const side = new THREE.Vector3(forward.z, 0, -forward.x);
-  const contactFrame = move.startup + move.active;
+  const dashEnd = move.startup + move.active;
+  const contactFrame = grabContactFrame(move);
   const elapsed = frame - contactFrame;
   const smooth = THREE.MathUtils.smoothstep;
   const visualScale = boss.binder ? 1 : boss.scale;
@@ -258,8 +288,24 @@ export function poseBossGrab(boss) {
     worldRotate(rig.spine, delta.setFromAxisAngle(side, lean), 1);
   }
 
-  const reach = smooth(frame, move.startup - 8, move.startup + 5);
-  const hand = world(0.36, 0.12 + 0.53 * reach, 0.92 + 0.40 * reach);
+  if (!boss.grabConnected && frame >= move.startup - 5) {
+    const stride = Math.sin(smooth(frame, move.startup - 5, dashEnd + 1) * Math.PI);
+    poseLimb(rig.rightLeg, world(-0.16, 0.50 * stride, 0.10 + 0.17 * stride),
+      forward.clone(), upperWeight * stride);
+    poseLimb(rig.leftLeg, world(0.16, -0.27 * stride, 0.10), forward.clone(), upperWeight * stride);
+  } else if (boss.grabConnected) {
+    const target = world(-0.12, 0.18 + 0.77 * kick, 0.12 + 1.03 * kick);
+    poseLimb(rig.rightLeg, target, forward.clone().setY(0.55), kick);
+  }
+  boss.binder?.groundPose(boss, 0);
+
+  const windup = smooth(frame, move.startup - 8, dashEnd);
+  const hand = world(0.36, 0.12 + 0.17 * windup, 0.92 + 0.37 * windup);
+  if (!boss.grabConnected && frame >= dashEnd && move.active > 0) {
+    const close = frame <= contactFrame && inGrabReach(boss, player.pos);
+    const extension = close ? playerGripTarget(player, forward) : world(.20, GRAB_REACH.far, 1.34);
+    hand.lerp(extension, smooth(frame, dashEnd, contactFrame));
+  }
   if (boss.grabConnected && rig.chest) {
     const lift = smooth(elapsed, GRAB_TIMING.pull, GRAB_TIMING.lift);
     const grip = rig.chest.getWorldPosition(new THREE.Vector3())
@@ -274,18 +320,11 @@ export function poseBossGrab(boss) {
       hand.lerp(grip, release);
     }
   }
-  poseLimb(rig.leftArm, hand, side.clone().setY(-0.6), gripWeight);
-
-  if (!boss.grabConnected && frame >= move.startup - 5) {
-    const stride = Math.sin(smooth(frame, move.startup - 5, contactFrame) * Math.PI);
-    poseLimb(rig.rightLeg, world(-0.16, 0.50 * stride, 0.10 + 0.17 * stride),
-      forward.clone(), upperWeight * stride);
-    poseLimb(rig.leftLeg, world(0.16, -0.27 * stride, 0.10), forward.clone(), upperWeight * stride);
-  } else if (boss.grabConnected) {
-    const target = world(-0.12, 0.18 + 0.77 * kick, 0.12 + 1.03 * kick);
-    poseLimb(rig.rightLeg, target, forward.clone().setY(0.55), kick);
+  if (boss.grabConnected && (sequence?.phase === 'held' || sequence?.phase === 'toss')) {
+    const hold = 1 - smooth(elapsed, GRAB_TIMING.toss, GRAB_TIMING.toss + 7);
+    hand.lerp(playerGripTarget(player, forward), hold);
   }
-  return rig.leftArm[2];
+  poseLimb(rig.leftArm, hand, side.clone().setY(-0.6), gripWeight);
 }
 
 function flightTilt(age) {
@@ -373,7 +412,7 @@ function poseGroundStruggle(rig, sequence) {
   }
 }
 
-export function poseGrabVictim(player, sequence, grabHand) {
+export function poseGrabVictim(player, sequence) {
   if (!sequence) return;
   const group = player.mesh.group;
   const smooth = THREE.MathUtils.smoothstep;
@@ -384,8 +423,10 @@ export function poseGrabVictim(player, sequence, grabHand) {
   let groundedAnimation = false;
   if (sequence.phase === 'held') {
     tilt = 0.18 * smooth(sequence.age, GRAB_TIMING.pull, GRAB_TIMING.lift);
+    centerWeight = 0;
   } else if (sequence.phase === 'toss') {
     tilt = THREE.MathUtils.lerp(0.18, -0.36, smooth(sequence.age, GRAB_TIMING.toss, GRAB_TIMING.kick));
+    centerWeight = smooth(sequence.age, GRAB_TIMING.toss, GRAB_TIMING.toss + 10);
   } else if (sequence.phase === 'flight') {
     tilt = flightTilt(sequence.age);
   } else {
@@ -429,13 +470,6 @@ export function poseGrabVictim(player, sequence, grabHand) {
       if (toe) lowest = Math.min(lowest, toe.getWorldPosition(point).y);
     }
     group.position.y += 0.012 - lowest;
-  }
-  if (grabHand && rig.chest && (sequence.phase === 'held' || sequence.phase === 'toss')) {
-    const grasp = smooth(sequence.age, 0, GRAB_TIMING.pull)
-      * (1 - smooth(sequence.age, GRAB_TIMING.toss, GRAB_TIMING.toss + 7));
-    const contact = grabHand.getWorldPosition(new THREE.Vector3());
-    rig.chest.getWorldPosition(point);
-    group.position.addScaledVector(contact.sub(point), grasp);
   }
   if (sequence.phase === 'wall' && !groundedAnimation) group.position.y = Math.max(0, group.position.y);
 }

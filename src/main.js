@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import GUI from 'lil-gui';
-import { CFG, MOVES, LIMITS, GRAB_TIMING, totalFrames, motionAt, dumpJSON, moveIssues, validateAll } from './frame-data.js';
+import { CFG, MOVES, LIMITS, GRAB_TIMING, grabContactFrame, totalFrames, motionAt, dumpJSON, moveIssues, validateAll } from './frame-data.js';
 import { makeFighter, createViz, placeViz, applyPose } from './graybox.js';
 import { buildStage, updateStage, ARENA_R } from './arena/stage.js';
 import { createSettings } from './settings.js';
@@ -26,7 +26,8 @@ import { ULTIMATE_END, ULTIMATE_CANCEL_FROM, ULTIMATE_CAMERA_RETURN, ULTIMATE_CU
   loadPlayerUltimate, loadNativeClip } from './ultimate.js';
 import { METEOR, meteorFrame, newMeteorSmash, updateMeteorSmash } from './meteor-smash.js';
 import { BossSmashEffect } from './vfx/boss-smash.js';
-import { clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
+import { BossGrabBlink } from './vfx/grab-blink.js';
+import { GRAB_REACH, grabReachBounds, grabSideTolerance, inGrabReach, clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus, grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
 
 // ═══════════════════════════════════════════════════════════════
 //  0.0 调参持久化（帧数据 / 全局 CFG / 特效）
@@ -368,7 +369,9 @@ const impactCamera = new ImpactCamera();
 const dodgeEffect = new PerfectDodgeEffect(scene);
 const ultimateEffect = new UltimateEffect(scene,ARENA_R);
 const bossSmashEffect = new BossSmashEffect(scene, STAGE.impactSurface);
+const bossGrabBlink = new BossGrabBlink(scene);
 composer.addPass(bossSmashEffect.pass);
+composer.addPass(bossGrabBlink.pass);
 composer.addPass(dodgeEffect.pass);
 composer.addPass(vfx.guardImpact.pass);
 
@@ -483,6 +486,7 @@ function rebuildKeymap() {
 rebuildKeymap();
 
 let grabSequence = null;
+let grabSpacing = false;
 let bossIntro = null;
 const canvas = renderer.domElement;
 const settingsOpen = () => document.getElementById('settings').classList.contains('open');
@@ -820,6 +824,10 @@ function cylinderHit(aPos, aR, aY0, aY1, bPos, bR, bY0, bY1) {
 /** 找到当前判定窗口。连斩每一段各自记录命中。 */
 function activeStrike(move, frame) {
   if (!move || move.active <= 0) return null;
+  if (move.grab) {
+    const startup = grabContactFrame(move);
+    return frame >= startup && frame < startup + 1 ? { index: 0, startup, active: 1, swing: move.swing } : null;
+  }
   const followUps = move.followUps;
   if (followUps) {
     for (let i = followUps.length - 1; i >= 0; i--) {
@@ -846,6 +854,12 @@ function activeHitbox(actor) {
     };
   }
   const f = actor.forward;
+  if (m.grab) {
+    return {
+      strike, center: grabPoint(actor, f, 0, GRAB_REACH.standOff, 0),
+      radius: grabSideTolerance(actor), yMin: 1.10, yMax: 1.65,
+    };
+  }
   const center = actor.pos.clone().addScaledVector(f, m.hitbox.offset * actor.scale);
   return {
     strike,
@@ -881,7 +895,6 @@ const ultimateTarget = new THREE.Vector3();
 const POISE_BREAK_FRAMES = { player: 44, boss: 96 };
 const rollSweep = new THREE.Line3();
 const dodgeProbe = new THREE.Vector3();
-const dodgeGrabOffset = new THREE.Vector3();
 let perfectDodgeFrame = null;
 let dodgeSlowTime = 0;
 let dodgeVisualAlpha = 1;
@@ -936,10 +949,10 @@ function resolveHit(attacker, defender, hb) {
   const target = perfectWindow && rollSweep.distanceSq() > 1e-8
     ? rollSweep.closestPointToPoint(hb.center, true, dodgeProbe)
     : defender.pos;
-  if (!cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax, target, hurtR, hurtY, hurtY1)) return;
-
   const grab = attacker === boss && attacker.move.grab;
-  if (grab && attacker.forward.dot(dodgeGrabOffset.copy(target).sub(attacker.pos)) <= 0) return;
+  const connects = grab ? inGrabReach(boss, target)
+    : cylinderHit(hb.center, hb.radius, hb.yMin, hb.yMax, target, hurtR, hurtY, hurtY1);
+  if (!connects) return;
   if (perfectWindow) {
     attacker.hitSet.add(hitKey);
     confirmPerfectDodge();
@@ -1580,13 +1593,11 @@ function lerpYaw(from, to, weight) {
 function capturePlayer() {
   const move = boss.move;
   boss.grabConnected = true;
-  boss.frame = move.startup + move.active;
   const direction = boss.forward;
   grabSequence = {
     phase: 'held', age: 0, direction, origin: player.pos.clone(), damage: move.damage,
     startFrame: logicFrame, initialYaw: player.yaw, caughtYaw: boss.yaw + Math.PI,
   };
-  player.yaw = grabSequence.caughtYaw;
   player.setState('grabbed');
   player.moving = false;
   player.speed = 0;
@@ -1628,9 +1639,12 @@ function advanceGrab() {
     const lift = THREE.MathUtils.smoothstep(age, timing.pull, timing.lift);
     const toss = THREE.MathUtils.clamp((age - timing.toss) / (timing.kick - timing.toss), 0, 1);
     const height = 0.52 * lift + Math.sin(toss * Math.PI) * 0.45 + 0.03 * toss;
-    const target = grabPoint(boss, direction, 0.23 * (1 - toss), 0.62 + 0.43 * toss, height);
+    const target = grabPoint(boss, direction, 0, 1.05, 0);
     clampToWall(target, playerWallRadius());
-    player.pos.copy(sequence.origin).lerp(target, THREE.MathUtils.smoothstep(age, 0, timing.pull));
+    // Keep the victim at the contact point. The hand follows the body until the throw.
+    player.pos.lerpVectors(sequence.origin, target, toss);
+    player.pos.y = sequence.origin.y + height;
+    player.yaw = lerpYaw(sequence.initialYaw, sequence.caughtYaw, THREE.MathUtils.smoothstep(age, 0, timing.pull));
     if (age >= timing.toss) sequence.phase = 'toss';
     if (age < timing.kick) return;
 
@@ -1686,12 +1700,23 @@ function tickBossGrab(move) {
     const d = player.pos.clone().sub(boss.pos);
     boss.turnToward(Math.atan2(d.x, d.z), CFG.bossTurnFrames);
   }
-  const contactFrame = move.startup + move.active;
-  if (!boss.grabConnected) {
-    const advance = frame => THREE.MathUtils.smoothstep(frame, move.startup - 1, contactFrame - 1);
-    const distance = (advance(boss.frame) - advance(previousFrame)) * move.dashDistance;
-    if (distance > 0) boss.translate(distance);
+  const dashEnd = move.startup + move.active;
+  if (move.active > 0 && boss.frame >= move.startup && boss.frame < dashEnd) {
+    if (boss.frame === move.startup && VFX_CFG.enabled && VFX_CFG.intensity > 0) {
+      bossGrabBlink.begin(boss.pos, boss.yaw, logicFrame - 1);
+    }
+    const advance = frame => THREE.MathUtils.smoothstep(frame, move.startup - 1, dashEnd - 1);
+    const stride = (advance(boss.frame) - advance(previousFrame)) * move.dashDistance;
+    const bounds = player.iframe <= 0 ? grabReachBounds(boss, player.pos) : null;
+    const stopInReach = bounds && bounds.gap >= GRAB_REACH.near && bounds.far >= GRAB_REACH.standOff;
+    const distance = stopInReach ? Math.min(stride, Math.max(0, bounds.gap - GRAB_REACH.standOff)) : stride;
+    if (distance > 0) {
+      boss.translate(distance);
+      bossGrabBlink.trace(boss.pos, logicFrame);
+    }
+    if (distance < stride && inGrabReach(boss, player.pos)) boss.frame = dashEnd;
   }
+  const contactFrame = grabContactFrame(move);
   const recovery = boss.grabConnected ? Math.max(move.recovery, GRAB_TIMING.recover) : GRAB_TIMING.missRecovery;
   if (boss.frame >= contactFrame + recovery) finishBossAttack(BOSS_ATTACK_RULES.b_grab.punishFrames);
 }
@@ -2269,13 +2294,22 @@ function tick() {
   // 玩家就会被「推着走」—— 玩家自己走一步，Boss 挤回来半步，净位移全由 Boss 决定。
   const bossDashingToGrab = boss.move?.grab && boss.frame >= boss.move.startup
     && boss.frame < boss.move.startup + boss.move.active;
+  const bossApproachingGrab = boss.move?.grab && boss.move.active > 0 && boss.frame >= boss.move.startup
+    && boss.frame <= grabContactFrame(boss.move);
+  if (bossApproachingGrab) grabSpacing = true;
+  if (bossGrabBlink.dashing && (!bossDashingToGrab || player.state === 'dead')) {
+    bossGrabBlink.finish(boss.pos, logicFrame);
+  }
   const meteorLanding = meteorSmash && meteorSmash.frame >= METEOR.launch && meteorSmash.frame < METEOR.impact + 12;
-  if (!grabSequence && !bossDashingToGrab && !meteorLanding && player.state !== 'dead' && boss.state !== 'dead'
+  if (!grabSequence && !bossApproachingGrab && !meteorLanding && player.state !== 'dead' && boss.state !== 'dead'
     && player.state !== 'roll' && player.iframe <= 0) {
     const dx = player.pos.x - boss.pos.x;
     const dz = player.pos.z - boss.pos.z;
     const d = Math.hypot(dx, dz);
-    const minD = player.hurt.radius + boss.hurt.radius * boss.scale;
+    const usualGap = player.hurt.radius + boss.hurt.radius * boss.scale;
+    // Preserve the close spacing after a whiff until the fighters separate naturally.
+    if (d >= usualGap) grabSpacing = false;
+    const minD = grabSpacing ? GRAB_REACH.standOff : usualGap;
 
     if (d > 0.001 && d < minD) {
       const overlap = minD - d;
@@ -2827,7 +2861,8 @@ function render(dtReal, dodgeScale) {
   const castFrame = cast ? THREE.MathUtils.lerp(cast.previous, player.frame, ultimateAlpha) : 0;
   const dtFeedback = CFG.paused ? 0 : dtReal;
   player.syncMesh(cast?.motion ? ultimateAlpha : dodgeVisualAlpha,dtFeedback);
-  boss.syncMesh(meteorSmash ? ultimateAlpha : dodgeVisualAlpha,dtFeedback);
+  const bossAlpha = meteorSmash || bossGrabBlink.dashing ? ultimateAlpha : dodgeVisualAlpha;
+  boss.syncMesh(bossAlpha,dtFeedback);
   const getUp = grabSequence?.phase === 'wall' ? grabGetUpProgress(grabSequence) : 0;
   if (combatReady) {
     // 擒拿的所有姿态都跟随战斗帧，慢放或命中冻结时和判定保持同步。
@@ -2867,7 +2902,7 @@ function render(dtReal, dodgeScale) {
 
   const bv = activeHitbox(boss);
   placeViz(boss.hitViz, boss.pos, boss.yaw,
-    boss.move ? boss.move.hitbox.offset * boss.scale : 0,
+    boss.move?.grab ? GRAB_REACH.standOff : boss.move ? boss.move.hitbox.offset * boss.scale : 0,
     bv ? bv.radius : 0,
     bv ? bv.yMin : 0, bv ? bv.yMax : 1, showHitbox && !!bv);
 
@@ -2883,9 +2918,8 @@ function render(dtReal, dodgeScale) {
   // 姿态：由帧表驱动的程序化骨骼动画 + 脚部 IK
   applyActorPose(player, dtReal, getUp, dodgeVisualAlpha);
   applyActorPose(boss, dtReal, 0, dodgeVisualAlpha);
-  const grabHand = poseBossGrab(boss);
-  if (boss.move?.grab) boss.binder?.groundPose(boss, 0);
-  poseGrabVictim(player, grabSequence, grabHand);
+  poseGrabVictim(player, grabSequence);
+  poseBossGrab(boss, player, grabSequence);
 
   // Blade motion follows combat time. Sparks and contact flashes continue
   // through the freeze so the hit still has motion on the locked pose.
@@ -2911,6 +2945,10 @@ function render(dtReal, dodgeScale) {
   }
   bossSmashEffect.update(meteorSmash, meteorSmash ? meteorFrame(boss.move, boss.sampleActionFrame(ultimateAlpha)) : 0,
     dtVfx, intensity, camera);
+  if (combatReady && !bossIntro) {
+    const blinkFrame = Math.max(0, logicFrame - 1 + bossAlpha);
+    boss.mesh.group.visible = !bossGrabBlink.update(blinkFrame, boss.mesh.group.position, intensity, camera);
+  }
 
   // ── 真实剑轨：按「刃根 → 刃尖」逐帧采样，扇形由剑自己扫出来 ──
   feedBladeTrail('player', player, dtVfx);
@@ -3284,7 +3322,7 @@ const grabTest = {
   startup: MOVES.b_grab.startup,
   active: MOVES.b_grab.active,
   dashDistance: MOVES.b_grab.dashDistance,
-  hitRadius: MOVES.b_grab.hitbox.radius * boss.scale,
+  hitRadius: GRAB_REACH.side,
   aimLockFrames: MOVES.b_grab.aimLockFrames,
   damage: MOVES.b_grab.damage,
   status: '等待加载',
@@ -3334,7 +3372,8 @@ function updateGrabTestStatus() {
   else if (grabSequence) grabTest.status = grabTestPhases[grabSequence.phase];
   else if (!move?.grab) grabTest.status = '待命 · G 出招';
   else if (boss.frame < move.startup) grabTest.status = '红光预警';
-  else if (boss.frame < move.startup + move.active) grabTest.status = '突进抓取';
+  else if (boss.frame < move.startup + move.active) grabTest.status = '闪现接近';
+  else if (boss.frame < grabContactFrame(move)) grabTest.status = '现身伸手';
   else grabTest.status = boss.grabConnected ? '命中收招' : '抓空收招';
 }
 
@@ -3349,9 +3388,9 @@ if (grabTestMode) {
   gui.add(grabTest, 'distance', 2.5, 8, 0.05).name('起始距离 (m)');
   const params = gui.addFolder('擒拿参数 · 下次出招生效').open();
   params.add(grabTest, 'startup', 8, 120, 1).name('红光预警 (帧)');
-  params.add(grabTest, 'active', 3, 40, 1).name('突进抓取 (帧)');
-  params.add(grabTest, 'dashDistance', 1, 9, 0.05).name('突进距离 (m)');
-  params.add(grabTest, 'hitRadius', 0.2, 2.5, 0.01).name('抓取半径 (m)');
+  params.add(grabTest, 'active', 3, 40, 1).name('闪现位移 (帧)');
+  params.add(grabTest, 'dashDistance', 1, 9, 0.05).name('闪现距离 (m)');
+  params.add(grabTest, 'hitRadius', 0.12, GRAB_REACH.side, 0.01).name('横向抓取容差 (m)');
   params.add(grabTest, 'aimLockFrames', 0, 30, 1).name('提前锁方向 (帧)');
   params.add(grabTest, 'damage', 0, 600, 5).name('踢击伤害');
   const debug = gui.addFolder('播放与判定').open();
@@ -3389,6 +3428,7 @@ function finishBossIntro() {
 function resetFight() {
   finishBossIntro();
   grabSequence = null;
+  grabSpacing = false;
   if (grabTestMode) {
     const playerZ = grabTest.location === '近墙' ? playerWallRadius() - 0.32 : 2.9;
     player.reset([0, playerZ], Math.PI);
@@ -3419,6 +3459,7 @@ function resetFight() {
   ultimateEffect.clear();
   meteorSmash = null;
   bossSmashEffect.clear();
+  bossGrabBlink.clear();
   boss.stunMarks = [];
   boss.armorUntil = -1;
   scratch.clear();
@@ -3485,6 +3526,7 @@ function completeLoading() {
   try {
     renderer.compile(ultimateEffect.root, camera, scene);
     renderer.compile(bossSmashEffect.root, camera, scene);
+    renderer.compile(bossGrabBlink.root, camera, scene);
   } finally {
     renderer.setRenderTarget(target);
   }
