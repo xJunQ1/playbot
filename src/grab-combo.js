@@ -173,7 +173,7 @@ export function restoreGrabJoints() {
   adjusted.clear();
 }
 
-function rigFor(actor) {
+export function rigFor(actor) {
   const source = actor.binder?.root ?? actor.mesh.group;
   if (rigCache.has(source)) return rigCache.get(source);
   const bones = new Map();
@@ -185,6 +185,7 @@ function rigFor(actor) {
   const rig = actor.binder ? {
     spine: get('spine', 'spine_01'),
     chest: get('spine2', 'spine_03') ?? get('spine1', 'spine_02'),
+    head: get('head', 'neck_02'),
     pelvis: get('hips', 'pelvis'),
     toes: [get('lefttoebase', 'l_toebase'), get('righttoebase', 'r_toebase')],
     leftArm: [get('leftarm', 'l_upperarm'), get('leftforearm', 'l_forearm'), get('lefthand', 'l_hand')],
@@ -193,6 +194,7 @@ function rigFor(actor) {
   } : {
     spine: mesh.spine,
     chest: mesh.chest,
+    head: mesh.head,
     pelvis: mesh.hips,
     leftArm: [mesh.armL, mesh.foreL, mesh.handL],
     rightLeg: [mesh.legR, mesh.shinR, mesh.footR],

@@ -27,6 +27,8 @@ import { ULTIMATE_END, ULTIMATE_CANCEL_FROM, ULTIMATE_CAMERA_RETURN, ULTIMATE_CU
 import { METEOR, meteorFrame, newMeteorSmash, updateMeteorSmash } from './meteor-smash.js';
 import { BossSmashEffect } from './vfx/boss-smash.js';
 import { BossGrabBlink } from './vfx/grab-blink.js';
+import { BossCataclysmEffect } from './vfx/boss-ultimate.js';
+import { CATACLYSM, CATACLYSM_MOVE, cataclysmShelters, cataclysmCovered, poseCataclysm } from './boss-ultimate.js';
 import { GRAB_REACH, GRAB_HAND_RADIUS, grabReachBounds, inGrabReach, grabHandPosition, grabTouchesTorso, grabSweepsTorso,
   clampToWall, launchContact, grabPoint, grabGetUpProgress, grabRecoveryFrames, grabWallCameraFocus,
   grabBossAnimation, grabPlayerAnimation, restoreGrabJoints, poseBossGrab, poseGrabVictim, swordGripPose } from './grab-combo.js';
@@ -381,10 +383,14 @@ const dodgeEffect = new PerfectDodgeEffect(scene);
 const ultimateEffect = new UltimateEffect(scene,ARENA_R);
 const bossSmashEffect = new BossSmashEffect(scene, STAGE.impactSurface);
 const bossGrabBlink = new BossGrabBlink(scene);
+const arenaCenter = new THREE.Vector3();
+const cataclysmCover = cataclysmShelters(STAGE.standingColumns);
+const cataclysmEffect = new BossCataclysmEffect(scene, STAGE.impactSurface, ARENA_R, cataclysmCover);
 composer.addPass(bossSmashEffect.pass);
 composer.addPass(bossGrabBlink.pass);
 composer.addPass(dodgeEffect.pass);
 composer.addPass(vfx.guardImpact.pass);
+composer.addPass(cataclysmEffect.pass);
 
 // ── 画质档位：低 / 中 / 高，F4 键循环
 //  只动「渲染分辨率 / 环境光遮蔽 / 装饰物件」，不改光照数量（改灯会触发着色器重编译）
@@ -640,7 +646,7 @@ class Actor {
     if (name !== 'recover') this.recoveryFrames = 0;
     this.frame = 0;
     this.moveId = moveId;
-    this.move = moveId ? MOVES[moveId] : null;
+    this.move = moveId === 'b_cataclysm' ? CATACLYSM_MOVE : moveId ? MOVES[moveId] : null;
     this.hitSet.clear();
     if (name === 'roll') { this.iframe = CFG.playerIframe; this.rollTotal = CFG.rollTotal; }
   }
@@ -861,6 +867,7 @@ function activeStrike(move, frame) {
 
 function activeHitbox(actor) {
   const m = actor.move;
+  if (m?.arenaUltimate) return null;
   const strike = activeStrike(m, actor.frame);
   if (!strike) return null;
   if (m.meteor) {
@@ -909,6 +916,7 @@ const HIT_POISE_REGEN_DELAY = 90;
 const HIT_POISE_REGEN_RATE = .24;
 let ultimateCast = null, releasedUltimate = null, playerUltimateMotion = null;
 let meteorSmash = null;
+let cataclysm = null;
 const ultimateDelta = new THREE.Vector3();
 const ultimateTarget = new THREE.Vector3();
 const POISE_BREAK_FRAMES = { player: 44, boss: 96 };
@@ -1126,7 +1134,7 @@ function stepPoiseBreak(actor) {
 }
 
 function applyDamage(attacker, defender, move, hitbox) {
-  if (defender === player && player.state === 'block') {
+  if (defender === player && player.state === 'block' && !move.arenaUltimate) {
     if (player.frame <= PARRY_WINDOW) {
       if (!damagePoise(boss, PARRY_POISE_DAMAGE)) {
         boss.setState('parried');
@@ -1200,13 +1208,13 @@ function applyDamage(attacker, defender, move, hitbox) {
   const direction = contactDirection(attacker,defender,move.meteor ? hitbox.center : attacker.pos);
   const strong = profile.weight >= .70 || profile === IMPACT.bossSlash;
   playImpact(defender,direction,profile,strong,hitbox.strike.swing === 'vertical');
-  if (!move.meteor) vfx.hit(meleeContact(attacker,defender,hitbox),direction,
+  if (!move.meteor && !move.arenaUltimate) vfx.hit(meleeContact(attacker,defender,hitbox),direction,
     profile.weight,attacker.isBoss,hitbox.strike.swing);
   finishDeath(defender);
 }
 
 function attackImpact(actor, strike) {
-  if (actor.move?.meteor) return IMPACT.meteor;
+  if (actor.move?.meteor || actor.move?.arenaUltimate) return IMPACT.meteor;
   if (actor.isBoss) return strike?.swing === 'vertical' ? IMPACT.bossSlam : IMPACT.bossSlash;
   if (actor.moveId === 'p_heavy3') return IMPACT.heavyEnd;
   if (actor.moveId?.startsWith('p_heavy')) return IMPACT.heavy;
@@ -1600,6 +1608,7 @@ const initialBossAI = () => ({
   lastMoveFrame: 0,
   gapFrames: 90,
   punishUntil: 0,
+  cataclysmAt: Infinity,
   closeSince: null,
   comboRangeSince: null,
   playerAttack: null,
@@ -2065,6 +2074,49 @@ function tickBossMeteor(move, targetYaw) {
   if (boss.frame >= totalFrames(move)) finishBossAttack(BOSS_ATTACK_RULES.b_meteor.punishFrames);
 }
 
+function startBossCataclysm() {
+  boss.setState('attack', 'b_cataclysm');
+  boss.speed = 0;
+  boss.moving = false;
+  AI.cataclysmAt = Infinity;
+  cataclysm = { ownerAction: boss.actionSequence, origin: boss.pos.clone(), impacted: false };
+  bossSmashEffect.clear();
+  cataclysmEffect.clear();
+  bossGrabBlink.begin(boss.pos, boss.yaw, logicFrame);
+}
+
+function tickBossCataclysm() {
+  const frame = ++boss.frame;
+  if (frame <= CATACLYSM.blink) {
+    const t = frame / CATACLYSM.blink;
+    boss.pos.lerpVectors(cataclysm.origin, arenaCenter, t * t * (3 - 2 * t));
+    bossGrabBlink.trace(boss.pos, logicFrame);
+    if (frame === CATACLYSM.blink) {
+      if (player.pos.lengthSq() > .04) boss.yaw = Math.atan2(player.pos.x, player.pos.z);
+      bossGrabBlink.finish(boss.pos, logicFrame);
+      cameraImpact(boss.forward, .23, .31);
+    }
+  }
+  if (frame >= totalFrames(CATACLYSM_MOVE)) finishBossAttack(28);
+}
+
+function resolveBossCataclysm() {
+  if (!cataclysm) return;
+  if (cataclysm.ownerAction !== boss.actionSequence || player.state === 'dead') {
+    cataclysm = null;
+    return;
+  }
+  if (cataclysm.impacted || boss.frame < CATACLYSM.impact) return;
+  cataclysm.impacted = true;
+  cataclysmEffect.impact(VFX_CFG.enabled ? VFX_CFG.intensity : 0);
+  cameraImpact(contactDirection(boss, player), .84, -.98);
+  hitstop(Math.round(HITSTOP_HEAVY() * .70));
+  if (!cataclysmCovered(player.pos, cataclysmCover)) {
+    player.iframe = 0;
+    applyDamage(boss, player, CATACLYSM_MOVE, { strike: { swing: 'vertical' } });
+  }
+}
+
 function bossTick() {
   if (boss.stunTimer > 0 && boss.state === 'hitstun') boss.stunTimer--;
   if (boss.state === 'dead') { boss.frame++; return; }
@@ -2133,6 +2185,7 @@ function bossTick() {
 
     default: {
       const move = boss.move;
+      if (move?.arenaUltimate) { tickBossCataclysm(); return; }
       if (move?.grab) { tickBossGrab(move); return; }
       if (move?.meteor) { tickBossMeteor(move, targetYaw); return; }
       if (move) {
@@ -2180,6 +2233,7 @@ function bossTick() {
       // ── 阶段转换：血量跌破阈值时强制打断当前行为，吼一声进入下一阶段 ──
       if (!AI.phase2 && boss.hp < boss.maxHp * 0.55) {
         AI.phase2 = true;
+        AI.cataclysmAt = logicFrame + CATACLYSM.phaseDelay;
         AI.intentUntil = 0;
         AI.feintChecked = false;
         // 「怒吼」动作已取消：阶段转换只做横幅 / 场景变化，不再播那段站着扭头的动作
@@ -2199,6 +2253,11 @@ function bossTick() {
         return;
       }
 
+      if (logicFrame >= AI.cataclysmAt && logicFrame - AI.lastMoveFrame >= Math.min(24, AI.gapFrames)
+        && player.state !== 'ultimate' && !player.reactingToHit) {
+        startBossCataclysm();
+        return;
+      }
       if (tryBossDefense(toPlayer)) return;
 
       // 贴身压力要持续一段时间，正常接敌距离不会触发后撤。
@@ -2267,7 +2326,7 @@ function cameraImpact(direction, strength, lift) {
 
 /** 出招第一帧挂预警；之后特效自己读 actor.frame，判定帧一到自动淡出 */
 function syncTelegraph(a, previousFrame) {
-  if (!a.move || a.move.meteor || a.move.active <= 0) return;
+  if (!a.move || a.move.meteor || a.move.arenaUltimate || a.move.active <= 0) return;
   if (previousFrame >= 1 || a.frame < 1) return;
   if (VFX_CFG.telegraphBossOnly && !a.isBoss) return;
   vfx.telegraph(a, a.move);
@@ -2365,7 +2424,7 @@ function guardContact(defender, attacker) {
  */
 function feedBladeTrail(key, a, dt, enabled = true) {
   if (!vfx.trails || !vfx.trails[key]) return;
-  const swinging = enabled && ATTACK_STATE_RE.test(a.state) && !a.move?.grab && !a.move?.meteor &&
+  const swinging = enabled && ATTACK_STATE_RE.test(a.state) && !a.move?.grab && !a.move?.meteor && !a.move?.arenaUltimate &&
     (activeStrike(a.move,a.frame+4) || activeStrike(a.move,a.frame-2));
   const group = a && a.binder && a.binder.weaponGroup;
   if (!swinging || !group) { vfx.feedTrail(key, null, null, dt, false); return; }
@@ -2409,9 +2468,11 @@ function tick() {
   if (player.state === 'ultimate' && ultimateCast) resolveUltimateCuts(ultimateCast);
   resolveUltimateWave();
   resolveHit(player, boss, activeHitbox(player));
+  resolveBossCataclysm();
   const bossHit = activeHitbox(boss) ?? grabArrivalDodge();
   if (bossHit && boss.move.meteor) {
     cameraImpact(contactDirection(boss,player,bossHit.center),IMPACT.meteor.shake,.90);
+    cataclysmEffect.clearCrater();
     bossSmashEffect.impact(bossHit.center, VFX_CFG.enabled ? VFX_CFG.intensity : 0);
     hitstop(Math.round(HITSTOP_HEAVY()*.50));
   }
@@ -2438,11 +2499,12 @@ function tick() {
   const bossApproachingGrab = boss.move?.grab && boss.move.active > 0 && boss.frame >= boss.move.startup
     && boss.frame <= grabLastContactFrame(boss.move);
   if (bossApproachingGrab) grabSpacing = true;
-  if (bossGrabBlink.dashing && (!bossDashingToGrab || player.state === 'dead')) {
+  const cataclysmBlink = cataclysm && boss.frame < CATACLYSM.blink;
+  if (bossGrabBlink.dashing && ((!bossDashingToGrab && !cataclysmBlink) || player.state === 'dead')) {
     bossGrabBlink.finish(boss.pos, logicFrame);
   }
   const meteorLanding = meteorSmash && meteorSmash.frame >= METEOR.launch && meteorSmash.frame < METEOR.impact + 12;
-  if (!grabSequence && !bossApproachingGrab && !meteorLanding && player.state !== 'dead' && boss.state !== 'dead'
+  if (!grabSequence && !bossApproachingGrab && !meteorLanding && !cataclysm && player.state !== 'dead' && boss.state !== 'dead'
     && player.state !== 'roll' && player.iframe <= 0) {
     const dx = player.pos.x - boss.pos.x;
     const dz = player.pos.z - boss.pos.z;
@@ -2536,7 +2598,14 @@ function updateCamera(dtReal, alpha = 1) {
     focus.addScaledVector(ultimateCast.side, -.22 * ultimateView);
   }
   const aerialAim = meteorSmash?.airborne ? Math.min(boss.pos.y, 3.8) * .20 : 0;
-  focus.y += THREE.MathUtils.lerp(normalFocus, 0.65, wallFocus) + .31 * ultimateWide + aerialAim;
+  const centerFacing = (Math.sin(camYaw) * cameraPlayer.x + Math.cos(camYaw) * cameraPlayer.z)
+    / Math.max(1, Math.hypot(cameraPlayer.x, cameraPlayer.z));
+  const meteorLook = cataclysm
+    ? THREE.MathUtils.smoothstep(boss.frame, CATACLYSM.blink, CATACLYSM.blink + 55)
+      * (1 - THREE.MathUtils.smoothstep(boss.frame, CATACLYSM.release, CATACLYSM.impact + 3))
+      * (player.lockOn ? 1 : THREE.MathUtils.smoothstep(centerFacing, .28, .85))
+    : 0;
+  focus.y += THREE.MathUtils.lerp(normalFocus, 0.65, wallFocus) + .31 * ultimateWide + aerialAim + .28 * meteorLook;
   const follow = 1 - Math.exp(-(returning ? 32 : 18) * dtReal);
   if (grabSequence?.phase === 'flight') {
     const direction = grabSequence.direction;
@@ -2630,7 +2699,8 @@ function updateCamera(dtReal, alpha = 1) {
   const toRail = Math.sqrt(Math.max(0, railRadius ** 2 - across ** 2)) - along;
   // 侧移时先维持短镜头臂，等朝向恢复后再伸回肩后距离。
   const extend = railExtend ?? (1 - THREE.MathUtils.smoothstep(Math.abs(yawOffset), 0, 0.45));
-  const desiredBoom = THREE.MathUtils.lerp(minBoom, (framing.distance - .34 * ultimateView + 1.65 * ultimateWide) * pitchScale, extend);
+  const boomDistance = framing.distance - .34 * ultimateView + 1.65 * ultimateWide + 2.28 * meteorLook;
+  const desiredBoom = THREE.MathUtils.lerp(minBoom, boomDistance * pitchScale, extend);
   const boom = THREE.MathUtils.clamp(toRail, 0.1, desiredBoom);
   camPos.set(pivotX + boom * sinYaw, camTarget.y + boom * Math.tan(camPitch), pivotZ + boom * cosYaw);
   camPos.y = Math.max(camPos.y, 0.45);
@@ -2652,7 +2722,7 @@ function updateCamera(dtReal, alpha = 1) {
 
   const offset = impactCamera.sample(dtReal,THREE.MathUtils.clamp(CFG.camShake/.06,0,2));
   camera.position.copy(camPos).add(offset);
-  camera.lookAt(aimX+offset.x*.36,camTarget.y+offset.y*.22,aimZ+offset.z*.36);
+  camera.lookAt(aimX+offset.x*.36,camTarget.y+offset.y*.22+.96*meteorLook,aimZ+offset.z*.36);
 }
 
 /** 把当前状态翻译成姿态并套到骨架上 */
@@ -3002,7 +3072,8 @@ function render(dtReal, dodgeScale) {
   const castFrame = cast ? THREE.MathUtils.lerp(cast.previous, player.frame, ultimateAlpha) : 0;
   const dtFeedback = CFG.paused ? 0 : dtReal;
   player.syncMesh(cast?.motion ? ultimateAlpha : dodgeVisualAlpha,dtFeedback);
-  const bossAlpha = meteorSmash || bossGrabBlink.dashing ? ultimateAlpha : dodgeVisualAlpha;
+  const bossAlpha = meteorSmash || cataclysm || bossGrabBlink.dashing ? ultimateAlpha : dodgeVisualAlpha;
+  const cataclysmFrame = !cataclysm ? -1 : cataclysm.impacted ? boss.frame : boss.sampleActionFrame(bossAlpha);
   boss.syncMesh(bossAlpha,dtFeedback);
   const getUp = grabSequence?.phase === 'wall' ? grabGetUpProgress(grabSequence) : 0;
   if (combatReady) {
@@ -3022,6 +3093,7 @@ function render(dtReal, dodgeScale) {
     const bossAnimDt = hitstopFrames > 0 ? 0 : animDt * CFG.timeScale;
     const kick = boss.move?.grab ? grabBossAnimation(boss) : undefined;
     if (bossIntro) bossIntro.pose(bossAnimDt);
+    else if (cataclysm) boss.binder?.update(boss, bossAnimDt, { key: 'idle', fade: .10 });
     else if (meteorSmash) {
       const frame = meteorFrame(boss.move, boss.sampleActionFrame(ultimateAlpha));
       boss.binder?.update(boss, bossAnimDt, { key: 'b_meteor', sampleTime: frame / 60, fade: .09, groundFeet: true });
@@ -3034,7 +3106,7 @@ function render(dtReal, dodgeScale) {
   scratch.update(CFG.paused ? 0 : dtReal * CFG.timeScale);
 
   // 判定可视化和角色一起等资源就绪。
-  const showHitbox = combatReady && !bossIntro && CFG.showHitbox;
+  const showHitbox = combatReady && !bossIntro && !cataclysm && CFG.showHitbox;
   const pv = activeHitbox(player);
   placeViz(player.hitViz, player.pos, player.yaw,
     player.move ? player.move.hitbox.offset * player.scale : 0,
@@ -3062,6 +3134,7 @@ function render(dtReal, dodgeScale) {
   applyActorPose(boss, dtReal, 0, dodgeVisualAlpha);
   poseGrabVictim(player, grabSequence);
   poseBossGrab(boss, player, grabSequence);
+  const castingHand = cataclysm ? poseCataclysm(boss, cataclysmFrame) : null;
 
   // Blade motion follows combat time. Sparks and contact flashes continue
   // through the freeze so the hit still has motion on the locked pose.
@@ -3087,6 +3160,8 @@ function render(dtReal, dodgeScale) {
   }
   bossSmashEffect.update(meteorSmash, meteorSmash ? meteorFrame(boss.move, boss.sampleActionFrame(ultimateAlpha)) : 0,
     dtVfx, intensity, camera);
+  cataclysmEffect.update(cataclysmFrame, castingHand, camera, dtFeedback, intensity,
+    reducedMotion.matches ? .55 : 1, renderer.getPixelRatio());
   if (combatReady && !bossIntro) {
     const blinkFrame = Math.max(0, logicFrame - 1 + bossAlpha);
     boss.mesh.group.visible = !bossGrabBlink.update(blinkFrame, boss.mesh.group.position, intensity, camera);
@@ -3602,6 +3677,8 @@ function resetFight() {
   ultimateEffect.clear();
   meteorSmash = null;
   bossSmashEffect.clear();
+  cataclysm = null;
+  cataclysmEffect.clear();
   bossGrabBlink.clear();
   boss.stunMarks = [];
   boss.armorUntil = -1;
@@ -3669,6 +3746,7 @@ function completeLoading() {
   try {
     renderer.compile(ultimateEffect.root, camera, scene);
     renderer.compile(bossSmashEffect.root, camera, scene);
+    renderer.compile(cataclysmEffect.root, camera, scene);
     renderer.compile(bossGrabBlink.root, camera, scene);
   } finally {
     renderer.setRenderTarget(target);

@@ -25,7 +25,7 @@ function sheet(width, height, fragmentShader, additive = false) {
   return mesh;
 }
 
-export function createMeteorLanding(scene, position, surface, { lava = false, radius = 2.10 } = {}) {
+export function createMeteorLanding(scene, position, surface, { lava = false, radius = 2.10, shockRing = lava } = {}) {
   const root = new THREE.Group();
   root.name = lava ? 'boss-smash-lava-impact' : 'boss-meteor-landing';
   position = position.clone();
@@ -53,7 +53,7 @@ export function createMeteorLanding(scene, position, surface, { lava = false, ra
   crater.receiveShadow = true;
   root.add(crater);
 
-  const shock = lava ? sheet(2, 2, `
+  const shock = shockRing ? sheet(2, 2, `
     varying vec2 vUv;
     uniform float strength, time;
     void main() {

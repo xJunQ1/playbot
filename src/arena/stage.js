@@ -533,6 +533,13 @@ buildPlatform();
   root.add(inst);
 })();
 
+const pillarSpecs = [
+  { x: -8.6, z: 5.2, h: 2.1, r: 0.62 },
+  { x: 7.8, z: -6.4, h: 2.6, r: 0.58 },
+  { x: 2.4, z: 10.4, h: 1.35, r: 0.5 },
+  { x: -10.2, z: -5.6, h: 1.7, r: 0.54 },
+];
+
 // ═══════════════════════════════════════ 台面微起伏 + 人尺度道具
 //  ① 台面不再是完美平面：只往下沉 0.3–3 cm，脚不会浮空
 //  ② 断柱 / 倒柱 / 铁链：给 2 m 高的角色一个尺度参照
@@ -548,12 +555,6 @@ buildPlatform();
   root.add(deck);
 
   // ── 断柱（立着的）
-  const pillarSpecs = [
-    { x: -8.6, z: 5.2, h: 2.1, r: 0.62 },
-    { x: 7.8, z: -6.4, h: 2.6, r: 0.58 },
-    { x: 2.4, z: 10.4, h: 1.35, r: 0.5 },
-    { x: -10.2, z: -5.6, h: 1.7, r: 0.54 },
-  ];
   const fallen = [
     { x: 6.2, z: 8.4, yaw: 0.7, len: 3.4 },
     { x: -4.4, z: -9.2, yaw: -0.4, len: 2.8 },
@@ -1415,7 +1416,7 @@ buildLights();
     if (material.transparent || material.alphaTest > 0) guardFromAO(object, material);
   });
   return {
-    radius: R, root, obstacles, impactSurface, setPhase: setStagePhase,
+    radius: R, root, obstacles, standingColumns: pillarSpecs, impactSurface, setPhase: setStagePhase,
     setDecor(on) { for (const object of REFS.decor) object.visible = on; },
   };
 }
